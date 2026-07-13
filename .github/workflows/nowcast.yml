@@ -1,0 +1,64 @@
+name: nowcast
+
+# Every 15 min: run one pipeline cycle and deploy the static site to GitHub Pages.
+# Precompute artifacts (operational/state/attrs_L*.csv, pixel_cat_L*.npz and
+# operational/web/data/catchments_L*.geojson + levels.json) must be committed once
+# (run `python run.py --precompute` locally). The rolling store (frames_L*.csv) is
+# persisted between runs via the Actions cache, so the 6-10 h window builds up.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"        # GitHub may delay under load; 15 min is the floor
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: nowcast-pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        working-directory: operational
+        run: pip install -r requirements.txt
+
+      - name: Restore rolling store
+        uses: actions/cache/restore@v4
+        with:
+          path: operational/state/frames_L*.csv
+          key: nowcast-store-${{ github.run_id }}
+          restore-keys: nowcast-store-
+
+      - name: Run one cycle
+        working-directory: operational
+        run: python run.py --once
+
+      - name: Save rolling store
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: operational/state/frames_L*.csv
+          key: nowcast-store-${{ github.run_id }}
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: operational/web
+      - id: deploy
+        uses: actions/deploy-pages@v4

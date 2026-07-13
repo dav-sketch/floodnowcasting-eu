@@ -1,0 +1,27 @@
+{
+ "levels": [
+  {
+   "level": 7,
+   "minzoom": 0,
+   "geometry": "catchments_L7.geojson",
+   "alerts": "alerts_L7.json"
+  },
+  {
+   "level": 8,
+   "minzoom": 8,
+   "geometry": "catchments_L8.geojson",
+   "alerts": "alerts_L8.json"
+  }
+ ],
+ "map": {
+  "minzoom": 3,
+  "maxzoom": 10
+ },
+ "radar_maxzoom": 7,
+ "domain": [
+  -12.0,
+  34.0,
+  45.0,
+  72.0
+ ]
+}

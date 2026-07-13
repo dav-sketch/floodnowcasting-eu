@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FloodNowcasting.eu 2.0</title>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <link href="style.css" rel="stylesheet" />
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="panel">
+    <h1>FloodNowcasting.eu <span>2.0</span></h1>
+    <p class="sub">Extreme-rainfall early warning · severity = rainfall return period at each basin's space–time scale</p>
+    <label class="toggle"><input type="checkbox" id="radar" checked /> Live radar</label>
+    <div id="legend">
+      <div class="lg"><i style="background:#f03b20"></i> ≥ 100-y rainfall</div>
+      <div class="lg"><i style="background:#feb24c"></i> ~ 30-y</div>
+      <div class="lg"><i style="background:#ffeda0"></i> ~ 10-y</div>
+      <div class="lg"><i style="background:#c7e9b4"></i> watch (&lt; 10-y)</div>
+    </div>
+    <p id="status">loading…</p>
+    <p id="level" class="lvl">basins: —</p>
+    <p class="foot">Data: RainViewer (calibrated) · Poschlod 2021 · HydroBASINS · ARF De Michele 2001 · severity Ceresetti 2012. Rainfall warning, not a discharge forecast.</p>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Large source data — NOT needed in the repo (precompute runs locally)
+hybas/
+_cache/
+IDF/
+*.pdf
+
+# Pipeline runtime that is regenerated / cached
+operational/state/frames_L*.csv     # rolling store — persisted via Actions cache
+operational/out/
+operational/web/data/alerts_L*.json # regenerated every cycle by the workflow
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Keep (do NOT ignore) the committed precompute artifacts:
+#   operational/state/attrs_L*.csv
+#   operational/state/pixel_cat_L*.npz
+#   operational/web/data/catchments_L*.geojson
+#   operational/web/data/levels.json

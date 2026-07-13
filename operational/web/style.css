@@ -1,0 +1,23 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+#map { position: absolute; inset: 0; }
+
+#panel {
+  position: absolute; top: 12px; left: 12px; z-index: 2;
+  width: 300px; max-width: calc(100vw - 24px);
+  background: rgba(255,255,255,0.95); border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.18); padding: 14px 16px;
+}
+#panel h1 { margin: 0 0 2px; font-size: 18px; font-weight: 700; color: #0b3d5c; }
+#panel h1 span { color: #2b8cbe; }
+.sub { margin: 0 0 10px; font-size: 11.5px; color: #555; line-height: 1.35; }
+.toggle { display: block; font-size: 13px; margin-bottom: 10px; cursor: pointer; }
+#legend { border-top: 1px solid #eee; padding-top: 8px; }
+.lg { display: flex; align-items: center; font-size: 12.5px; margin: 3px 0; color: #333; }
+.lg i { width: 14px; height: 14px; border-radius: 3px; margin-right: 8px; border: 1px solid #0003; }
+#status { font-size: 12px; color: #0b3d5c; margin: 10px 0 0; font-weight: 600; }
+.lvl { font-size: 11px; color: #2b8cbe; margin: 2px 0 0; font-weight: 600; }
+.foot { font-size: 10px; color: #888; margin: 8px 0 0; line-height: 1.35; }
+
+.maplibregl-popup-content { font-size: 12px; line-height: 1.5; }
+.maplibregl-popup-content b { color: #0b3d5c; }
