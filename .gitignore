@@ -4,17 +4,21 @@ _cache/
 IDF/
 *.pdf
 
-# Pipeline runtime that is regenerated / cached
-operational/state/frames_L*.csv     # rolling store — persisted via Actions cache
-operational/out/
-operational/web/data/alerts_L*.json # regenerated every cycle by the workflow
-
 # Python
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Keep (do NOT ignore) the committed precompute artifacts:
+# Pipeline runtime that is regenerated / cached (git has no inline comments,
+# so these patterns must sit on their own lines)
+operational/out/
+# rolling store — persisted between CI runs via the Actions cache
+operational/state/frames_L*.csv
+# regenerated every cycle by the workflow (deployed via Pages artifact)
+operational/web/data/alerts_L*.json
+operational/web/data/pins.geojson
+
+# Committed precompute artifacts (DO keep these):
 #   operational/state/attrs_L*.csv
 #   operational/state/pixel_cat_L*.npz
 #   operational/web/data/catchments_L*.geojson

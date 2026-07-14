@@ -17,10 +17,15 @@ python run.py --precompute
 ```
 
 Creates (small, meant to be committed):
-- `state/attrs_L7.csv`, `state/attrs_L8.csv`         (basin thresholds — ~4 MB)
-- `state/pixel_cat_L7.npz`, `state/pixel_cat_L8.npz`  (grid→basin map — ~1.4 MB)
-- `web/data/catchments_L7.geojson`, `..._L8.geojson`  (map geometry — ~17 MB)
-- `web/data/levels.json`                              (LOD manifest)
+- `state/attrs_L*.csv`         (per-level basin thresholds/centroids; L7/L8/L9)
+- `state/pixel_cat_L*.npz`     (compressed grid→basin map; L7/L8/L9)
+- `web/data/catchments_L7.geojson`, `..._L8.geojson`  (served polygon geometry)
+- `web/data/levels.json`       (LOD + pins manifest)
+
+L9 is computed for the alert **pins** only (its 41k polygons are never served), so
+it has `attrs_L9`/`pixel_cat_L9` but no geojson. The dynamic outputs
+(`alerts_L*.json`, `pins.geojson`, `frames_L*.csv`) are git-ignored and produced
+each cycle.
 
 > Redo this only when you change `DOMAIN_BBOX`, `LEVELS`, `TILE_Z` or `SIMPLIFY`.
 

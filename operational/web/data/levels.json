@@ -13,6 +13,14 @@
    "alerts": "alerts_L8.json"
   }
  ],
+ "pins": {
+  "file": "pins.geojson",
+  "radius": {
+   "7": 9,
+   "8": 6,
+   "9": 4
+  }
+ },
  "map": {
   "minzoom": 3,
   "maxzoom": 10

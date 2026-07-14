@@ -49,6 +49,19 @@ let manifest = null, LV = [];
       wirePopup(map, "fill" + L.level);
     });
 
+    // alert pins (all levels) — coloured dot at each alerting basin's centre,
+    // sized by level (L7 large ... L9 small), visible at every zoom.
+    const rad = manifest.pins.radius;
+    const radiusExpr = ["match", ["get", "level"]];
+    Object.entries(rad).forEach(([lv, r]) => radiusExpr.push(Number(lv), r));
+    radiusExpr.push(5);
+    map.addSource("pins", { type: "geojson", data: emptyFC() });
+    map.addLayer({
+      id: "pins", type: "circle", source: "pins",
+      paint: { "circle-radius": radiusExpr, "circle-color": ["get", "color"],
+               "circle-stroke-color": "#333", "circle-stroke-width": 1, "circle-opacity": 0.9 } });
+    wirePins(map);
+
     wireRadarToggle(map);
     map.on("zoomend", () => { ensureVisibleLevels(map); updateLevelBadge(map); });
     ensureVisibleLevels(map);
@@ -88,8 +101,26 @@ async function refresh(map) {
     if (data.meta && data.meta.generated_unix)
       when = new Date(data.meta.generated_unix * 1000).toUTCString().replace("GMT", "UTC");
   }
+  try {
+    const pins = await (await fetch("data/" + manifest.pins.file, { cache: "no-store" })).json();
+    map.getSource("pins").setData(pins);
+  } catch (e) { /* no pins yet */ }
   if (radarMeta) updateRadar(map, radarMeta);
   setStatus(`${total} basin alert${total === 1 ? "" : "s"} · updated ${when}`);
+}
+
+function wirePins(map) {
+  map.on("click", "pins", e => {
+    const p = e.features[0].properties;
+    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(
+      `<b>Alert · level ${p.level}</b><br>Severity: <b>${sevLabel(p.label)}</b>`
+      + (p.T > 0 ? `<br>Est. return period: <b>${p.T} y</b>` : "")
+      + `<br>Rain ${p.acc_mm} mm · 10-y thr ${p.thr_mm} mm<br>Basin ${p.HYBAS_ID}`
+    ).addTo(map);
+    map.flyTo({ center: e.lngLat, zoom: Math.max(map.getZoom(), p.level >= 9 ? 10 : p.level >= 8 ? 9 : 7) });
+  });
+  map.on("mouseenter", "pins", () => map.getCanvas().style.cursor = "pointer");
+  map.on("mouseleave", "pins", () => map.getCanvas().style.cursor = "");
 }
 
 function applyAlerts(map, level) {

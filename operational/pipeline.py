@@ -179,12 +179,18 @@ def _build_level(lv, glon, glat):
     p = _level_paths(lv)
     g.drop(columns="geometry").to_csv(p["attrs"], index=False)   # tiny table CI reads each cycle
     np.savez_compressed(p["pmap"], pixel_cat=pixel_cat)
-    _export_web_geometry(g, lv, p["geo"])
-    print(f"    L{lv}: {len(g)} basins, {(pixel_cat>=0).sum()} px inside")
+    if lv in C.POLY_LEVELS:                                       # L9 geometry too big to serve whole
+        _export_web_geometry(g, lv, p["geo"])
+    print(f"    L{lv}: {len(g)} basins, {(pixel_cat>=0).sum()} px inside"
+          f"{'' if lv in C.POLY_LEVELS else ' (pins only)'}")
+
+def _level_ready(lv):
+    need = ["attrs", "pmap"] + (["geo"] if lv in C.POLY_LEVELS else [])
+    return all(_level_paths(lv)[k].exists() for k in need)
 
 def precompute(force=False):
     xr, yr, glon, glat = domain_grid()
-    todo = [lv for lv in C.LEVELS if force or not all(_level_paths(lv)[k].exists() for k in ("attrs","pmap","geo"))]
+    todo = [lv for lv in C.LEVELS if force or not _level_ready(lv)]
     if todo:
         print("precompute: loading Poschlod ...")
         _load_returnlevels()
@@ -201,7 +207,8 @@ def load_level(lv):
 def _write_manifest():
     man = {"levels": [{"level": lv, "minzoom": C.LEVEL_MINZOOM.get(lv, 0),
                        "geometry": f"catchments_L{lv}.geojson", "alerts": f"alerts_L{lv}.json"}
-                      for lv in C.LEVELS],
+                      for lv in C.POLY_LEVELS],
+           "pins": {"file": "pins.geojson", "radius": {str(k): v for k, v in C.PIN_RADIUS.items()}},
            "map": {"minzoom": C.MAP_MINZOOM, "maxzoom": C.MAP_MAXZOOM},
            "radar_maxzoom": C.RADAR_MAXZOOM, "domain": C.DOMAIN_BBOX}
     (C.WEBDATA / "levels.json").write_text(json.dumps(man, indent=1))
@@ -292,24 +299,28 @@ def run_once(verbose=True):
             new_rows[lv].append(pd.Series(areal_mean_mm(rate, pmap, len(cat)),
                                           index=cat["HYBAS_ID"].tolist(), name=t))
 
-    out = {}
+    out = {}; pins = []
     for lv in C.LEVELS:
         st = prune_store(merge_frames(stores[lv], new_rows[lv]), C.WINDOW_H)
         if len(st): save_store(lv, st)
-        out[lv] = _severity_for_level(levels[lv][0], st, host, past, lv)
+        summary, lv_pins = _severity_for_level(levels[lv][0], st, host, past, lv)
+        out[lv] = summary; pins += lv_pins
+    _write_pins(pins)
     if verbose:
         for lv in C.LEVELS:
             r = out[lv]
             print(f"  L{lv}: {r['wet']} wet | {r['nalert']} >=10y | "
                   f"max acc {r['maxacc']:.1f} mm | max T {r['maxT']:.0f} y")
+        print(f"  pins: {len(pins)} alerting basins across levels")
     return out
 
 def _severity_for_level(cat, store, host, past, lv):
     if not len(store):
-        _write_level_alerts(cat.assign(acc_mm=0.0, coverage=0.0, ratio=0.0, T_years=0.0,
-                                       color="#2b8cbe22", label="none"),
-                            int(past[-1]["time"]), 0.0, 0, host, past, lv)
-        return {"wet": 0, "nalert": 0, "maxacc": 0.0, "maxT": 0.0}
+        if lv in C.POLY_LEVELS:
+            _write_level_alerts(cat.assign(acc_mm=0.0, coverage=0.0, ratio=0.0, T_years=0.0,
+                                           color="#2b8cbe22", label="none"),
+                                int(past[-1]["time"]), 0.0, 0, host, past, lv)
+        return {"wet": 0, "nalert": 0, "maxacc": 0.0, "maxT": 0.0}, []
     dtest = cat["D_test_h"].to_numpy()
     acc, span_h, now_t = window_accumulate(store, cat["HYBAS_ID"].tolist(), dtest)
     cov = np.minimum(span_h, dtest) / dtest
@@ -319,10 +330,21 @@ def _severity_for_level(cat, store, host, past, lv):
     cat["T_years"] = cat["ratio"].apply(est_return_period)
     cc = [classify(T, r, a) for T, r, a in zip(cat["T_years"], cat["ratio"], cat["acc_mm"])]
     cat["color"] = [c for c, _ in cc]; cat["label"] = [l for _, l in cc]
-    _write_level_alerts(cat, int(now_t), span_h, len(store), host, past, lv)
-    return {"wet": int((cat["acc_mm"] > 0.2).sum()),
-            "nalert": int(cat["label"].isin(["~10y", "~30y", ">=100y"]).sum()),
-            "maxacc": float(cat["acc_mm"].max()), "maxT": float(cat["T_years"].max())}
+    if lv in C.POLY_LEVELS:
+        _write_level_alerts(cat, int(now_t), span_h, len(store), host, past, lv)
+    pins = [{"type": "Feature",
+             "geometry": {"type": "Point", "coordinates": [round(r.cen_x, 4), round(r.cen_y, 4)]},
+             "properties": {"level": lv, "color": r.color, "label": r.label,
+                            "T": round(r.T_years), "acc_mm": round(r.acc_mm, 1),
+                            "thr_mm": round(r.thr_mm, 1), "HYBAS_ID": r.HYBAS_ID}}
+            for r in cat.itertuples() if r.label in C.PIN_LABELS]
+    return ({"wet": int((cat["acc_mm"] > 0.2).sum()),
+             "nalert": int(cat["label"].isin(["~10y", "~30y", ">=100y"]).sum()),
+             "maxacc": float(cat["acc_mm"].max()), "maxT": float(cat["T_years"].max())}, pins)
+
+def _write_pins(features):
+    (C.WEBDATA / "pins.geojson").write_text(
+        json.dumps({"type": "FeatureCollection", "features": features}))
 
 def _write_level_alerts(cat, now_t, span_h, n_frames, host, past, lv):
     meta = {"generated_unix": int(now_t), "store_span_h": round(span_h, 2), "n_frames": int(n_frames),

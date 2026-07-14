@@ -17,7 +17,7 @@ WEBDATA = WEB / "data"                               # catchments.geojson (stati
 for _d in (CACHE, STATE, OUT, WEBDATA):
     _d.mkdir(parents=True, exist_ok=True)
 
-SIMPLIFY = {7: 0.02, 8: 0.012, 9: 0.006}              # per-level web simplification (deg); finer level = finer geom
+SIMPLIFY = {7: 0.010, 8: 0.007}                       # per-level web simplification (deg); finer = crisper but bigger
 COORD_PRECISION = 4                                   # geojson coord decimals (~11 m); big filesize win
 
 # --- domain & cadence -------------------------------------------------
@@ -25,11 +25,17 @@ DOMAIN_BBOX = (-12.0, 34.0, 45.0, 72.0)  # (lon_min,lat_min,lon_max,lat_max) - a
 TILE_Z      = 6                          # radar tile zoom (must stay fixed once the store exists)
 
 # Level-of-detail: coarse level when zoomed out, finer as you zoom in.
-LEVELS        = [7, 8]                    # HydroBASINS levels to compute & serve (finest feasible whole-EU as GeoJSON)
-LEVEL_MINZOOM = {7: 0, 8: 8}             # a level's polygons show from this map zoom until the next level takes over
+LEVELS      = [7, 8, 9]                   # HydroBASINS levels COMPUTED each cycle (severity + pins)
+POLY_LEVELS = [7, 8]                      # levels whose polygons are served as zoom layers (L9 too big whole-EU)
+LEVEL_MINZOOM = {7: 0, 8: 8}             # a poly level's polygons show from this map zoom until the next takes over
 MAP_MINZOOM   = 3                         # prevent zooming out past continent
 MAP_MAXZOOM   = 10                        # prevent excessive zoom (avoids missing-tile ugliness)
 RADAR_MAXZOOM = 7                         # radar raster native maxzoom; MapLibre overzooms beyond (no blank tiles)
+
+# Alert pins: every alerting basin (any level) drops a coloured dot at its centre,
+# visible at all zooms so flash-flood (L9) alerts are spottable from far out.
+PIN_LABELS = ["watch", "~10y", "~30y", ">=100y"]   # which severities get a pin
+PIN_RADIUS = {7: 9, 8: 6, 9: 4}                    # circle radius (px) by level: L7 large ... L9 small
 WINDOW_H    = 10.0                        # max rolling window retained in the store (hours)
 UPDATE_MIN  = 30                          # loop cadence; clamped to [15, 120] by run.py
 FRAME_INTERVAL_MIN = 10                   # RainViewer past-frame spacing
