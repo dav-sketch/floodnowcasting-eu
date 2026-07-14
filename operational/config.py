@@ -74,3 +74,8 @@ ARF_A0_KM2 = 156.0
 RP_ANCHORS  = [(1.0, 10), (1.2, 30), (1.4, 100)]
 RP_COLORS   = [(10, "#ffeda0", "~10y"), (30, "#feb24c", "~30y"), (100, "#f03b20", ">=100y")]
 WATCH_RATIO = 0.8
+
+# Rainfall shading for WET-but-below-watch basins, so ordinary rain is visible
+# (not just extreme alerts). (accumulated mm >=, colour), pale -> blue.
+RAIN_MIN_MM = 0.3
+RAIN_TIERS  = [(0.3, "#d7ecf7"), (3.0, "#9ecae1"), (10.0, "#4292c6")]

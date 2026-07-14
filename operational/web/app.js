@@ -42,7 +42,7 @@ let manifest = null, LV = [];
       map.addLayer({ id: "fill" + L.level, type: "fill", source: "basins" + L.level,
         minzoom: zmin, maxzoom: zmax,
         paint: { "fill-color": ["get", "color"],
-                 "fill-opacity": ["case", ["==", ["get", "label"], "none"], 0.05, 0.62] } });
+                 "fill-opacity": ["match", ["get", "label"], "none", 0.03, "rain", 0.5, 0.62] } });
       map.addLayer({ id: "line" + L.level, type: "line", source: "basins" + L.level,
         minzoom: zmin, maxzoom: zmax,
         paint: { "line-color": "#5b6b77", "line-width": 0.4, "line-opacity": 0.5 } });

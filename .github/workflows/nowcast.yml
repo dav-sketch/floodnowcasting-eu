@@ -8,7 +8,15 @@ name: nowcast
 
 on:
   schedule:
-    - cron: "*/15 * * * *"        # GitHub may delay under load; 15 min is the floor
+    # ---- CADENCE: edit this one line freely ----
+    #   hourly        = "0 * * * *"   (current)
+    #   every 30 min  = "*/30 * * * *"
+    #   every 15 min  = "*/15 * * * *"
+    # IMPORTANT: keep the interval < 2 h. RainViewer serves only ~2 h of past
+    # frames, so consecutive runs must overlap for gap-free accumulation. The
+    # store dedupes frames by timestamp and sums over WINDOW_H, so totals stay
+    # correct for ANY cadence below 2 h. (GitHub may delay cron under load.)
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:

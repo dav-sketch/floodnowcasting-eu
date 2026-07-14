@@ -80,11 +80,15 @@ def est_return_period(ratio):
         lnT = np.interp(ratio, _ra, _rlnT)
     return float(np.exp(lnT))
 
-def classify(T, ratio):
+def classify(T, ratio, acc):
     if T >= C.RP_COLORS[2][0]: return C.RP_COLORS[2][1], C.RP_COLORS[2][2]
     if T >= C.RP_COLORS[1][0]: return C.RP_COLORS[1][1], C.RP_COLORS[1][2]
     if T >= C.RP_COLORS[0][0]: return C.RP_COLORS[0][1], C.RP_COLORS[0][2]
     if ratio >= C.WATCH_RATIO: return "#c7e9b4", "watch"
+    col = None
+    for mm, c in C.RAIN_TIERS:          # wet but below watch -> rainfall shading
+        if acc >= mm: col = c
+    if col: return col, "rain"
     return "#2b8cbe22", "none"
 
 # ----------------------------------------------------------------------
@@ -117,16 +121,24 @@ def _decode(img):
     rate[a < C.RAIN_ALPHA_MIN] = 0.0
     return rate
 
+_BLANK = np.zeros((256, 256, 4), np.uint8)
+def _get_tile(url, tries=3):
+    """Fetch one radar tile; transient errors -> blank (dry) tile, never crash."""
+    for k in range(tries):
+        try:
+            r = requests.get(url, timeout=30)
+            if r.status_code == 200:
+                return np.array(Image.open(io.BytesIO(r.content)).convert("RGBA"))
+            return _BLANK
+        except requests.RequestException:
+            if k == tries - 1:
+                return _BLANK
+    return _BLANK
+
 def fetch_frame_rate(host, path, xr, yr):
     cols = []
     for tx in xr:
-        rows = []
-        for ty in yr:
-            url = f"{host}{path}/256/{C.TILE_Z}/{tx}/{ty}/2/0_0.png"
-            r = requests.get(url, timeout=30)
-            im = (np.zeros((256, 256, 4), np.uint8) if r.status_code != 200
-                  else np.array(Image.open(io.BytesIO(r.content)).convert("RGBA")))
-            rows.append(im)
+        rows = [_get_tile(f"{host}{path}/256/{C.TILE_Z}/{tx}/{ty}/2/0_0.png") for ty in yr]
         cols.append(np.concatenate(rows, axis=0))
     return _decode(np.concatenate(cols, axis=1))
 
@@ -227,6 +239,36 @@ def areal_mean_mm(rate, pixel_cat, n_cat):
     cnt = np.bincount(idx, minlength=n_cat)
     return np.divide(tot, cnt, out=np.zeros(n_cat), where=cnt > 0)
 
+# ---- rolling-store algebra (the no-double-count guarantee lives here) ----
+# The store is keyed by each radar frame's UNIX timestamp. merge_frames dedupes
+# on that key, so a given 10-min frame is stored exactly once no matter how many
+# overlapping 2-h fetches (at any cadence) observe it. window_accumulate then
+# sums each stored frame once -> the 6-10 h total is cadence-independent and is
+# never inflated by re-seeing the same frame.
+def merge_frames(store, rows):
+    if rows:
+        parts = ([store] if len(store) else []) + [r.to_frame().T for r in rows]
+        store = pd.concat(parts)
+    if len(store):
+        store = store[~store.index.duplicated(keep="last")].sort_index()   # dedupe by timestamp
+    return store
+
+def prune_store(store, window_h):
+    if not len(store): return store
+    now_t = int(store.index.max())
+    return store[store.index >= now_t - window_h*3600]
+
+def window_accumulate(store, hids, d_test):
+    """Per-basin rainfall sum over each basin's trailing D_test window (mm),
+    plus (span_h, now_t). Each stored frame contributes exactly once."""
+    times = store.index.to_numpy(dtype=float)
+    now_t = times.max(); age_h = (now_t - times) / 3600.0; span_h = (now_t - times.min()) / 3600.0
+    acc = np.zeros(len(hids))
+    for i, (hid, dt) in enumerate(zip(hids, d_test)):
+        col = store[hid].to_numpy(dtype=float)
+        acc[i] = float(np.nansum(col[age_h <= dt]))
+    return acc, span_h, now_t
+
 # ----------------------------------------------------------------------
 # one cycle - decode each new frame ONCE, map it to every level
 # ----------------------------------------------------------------------
@@ -236,27 +278,24 @@ def run_once(verbose=True):
     host, past = rainviewer_frames()
     levels = {lv: load_level(lv) for lv in C.LEVELS}
     stores = {lv: load_store(lv) for lv in C.LEVELS}
-    have = {lv: (set(int(t) for t in stores[lv].index) if len(stores[lv]) else set()) for lv in C.LEVELS}
+    have = {lv: set(int(t) for t in stores[lv].index) for lv in C.LEVELS}
+    new_rows = {lv: [] for lv in C.LEVELS}
 
     todo = [f for f in past if any(int(f["time"]) not in have[lv] for lv in C.LEVELS)]
-    if verbose: print(f"cycle: {len(past)} frames available, {len(todo)} to decode (shared across levels)")
+    if verbose: print(f"cycle: {len(past)} frames available, {len(todo)} new to decode (shared across levels)")
     for f in todo:
         rate = fetch_frame_rate(host, f["path"], xr, yr)
         t = int(f["time"])
         for lv in C.LEVELS:
             if t in have[lv]: continue
             cat, pmap = levels[lv]
-            row = pd.Series(areal_mean_mm(rate, pmap, len(cat)),
-                            index=cat["HYBAS_ID"].tolist(), name=t)
-            stores[lv] = pd.concat([stores[lv], row.to_frame().T])
+            new_rows[lv].append(pd.Series(areal_mean_mm(rate, pmap, len(cat)),
+                                          index=cat["HYBAS_ID"].tolist(), name=t))
 
     out = {}
     for lv in C.LEVELS:
-        st = stores[lv]
-        if len(st):
-            st = st[~st.index.duplicated(keep="last")].sort_index()
-            now_t = int(st.index.max()); st = st[st.index >= now_t - C.WINDOW_H*3600]
-            save_store(lv, st)
+        st = prune_store(merge_frames(stores[lv], new_rows[lv]), C.WINDOW_H)
+        if len(st): save_store(lv, st)
         out[lv] = _severity_for_level(levels[lv][0], st, host, past, lv)
     if verbose:
         for lv in C.LEVELS:
@@ -271,17 +310,14 @@ def _severity_for_level(cat, store, host, past, lv):
                                        color="#2b8cbe22", label="none"),
                             int(past[-1]["time"]), 0.0, 0, host, past, lv)
         return {"wet": 0, "nalert": 0, "maxacc": 0.0, "maxT": 0.0}
-    times = store.index.to_numpy(dtype=float)
-    now_t = times.max(); age_h = (now_t - times) / 3600.0; span_h = (now_t - times.min()) / 3600.0
-    acc, cov = [], []
-    for hid, dtest in zip(cat["HYBAS_ID"], cat["D_test_h"]):
-        col = store[hid].to_numpy(dtype=float); sel = age_h <= dtest
-        acc.append(float(np.nansum(col[sel]))); cov.append(min(span_h, dtest) / dtest)
+    dtest = cat["D_test_h"].to_numpy()
+    acc, span_h, now_t = window_accumulate(store, cat["HYBAS_ID"].tolist(), dtest)
+    cov = np.minimum(span_h, dtest) / dtest
     cat = cat.copy()
     cat["acc_mm"] = acc; cat["coverage"] = np.round(cov, 2)
     cat["ratio"] = (cat["acc_mm"] / cat["thr_mm"].replace(0, np.nan)).fillna(0.0)
     cat["T_years"] = cat["ratio"].apply(est_return_period)
-    cc = [classify(T, r) for T, r in zip(cat["T_years"], cat["ratio"])]
+    cc = [classify(T, r, a) for T, r, a in zip(cat["T_years"], cat["ratio"], cat["acc_mm"])]
     cat["color"] = [c for c, _ in cc]; cat["label"] = [l for _, l in cc]
     _write_level_alerts(cat, int(now_t), span_h, len(store), host, past, lv)
     return {"wet": int((cat["acc_mm"] > 0.2).sum()),
