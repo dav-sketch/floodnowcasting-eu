@@ -17,7 +17,10 @@ WEBDATA = WEB / "data"                               # catchments.geojson (stati
 for _d in (CACHE, STATE, OUT, WEBDATA):
     _d.mkdir(parents=True, exist_ok=True)
 
-SIMPLIFY = {7: 0.010, 8: 0.007}                       # per-level web simplification (deg); finer = crisper but bigger
+# Per-level web simplification (deg); finer level = smaller basins, so use a
+# smaller tolerance to avoid collapsing them. L6 coarse/large -> simplify hard;
+# L9 many small basins -> only a "slight" simplification (kept crisp but trimmed).
+SIMPLIFY = {6: 0.020, 7: 0.012, 8: 0.007, 9: 0.005}
 COORD_PRECISION = 4                                   # geojson coord decimals (~11 m); big filesize win
 
 # --- domain & cadence -------------------------------------------------
@@ -25,20 +28,34 @@ DOMAIN_BBOX = (-12.0, 34.0, 45.0, 72.0)  # (lon_min,lat_min,lon_max,lat_max) - a
 TILE_Z      = 6                          # radar tile zoom (must stay fixed once the store exists)
 
 # Level-of-detail: coarse level when zoomed out, finer as you zoom in.
-LEVELS      = [7, 8, 9]                   # HydroBASINS levels COMPUTED each cycle (severity + pins)
-POLY_LEVELS = [7, 8]                      # levels whose polygons are served as zoom layers (L9 too big whole-EU)
-LEVEL_MINZOOM = {7: 0, 8: 8}             # a poly level's polygons show from this map zoom until the next takes over
+# L6 = continental first view; L7 = large; L8/L9 = the "relevant" fine levels.
+LEVELS      = [6, 7, 8, 9]                # HydroBASINS levels COMPUTED each cycle
+POLY_LEVELS = [6, 7, 8, 9]                # levels whose polygons are served as zoom layers (all served now)
+SEVERITY_LEVELS = [8, 9]                  # only these get severity classification; L6/L7 are accumulation-only
+LEVEL_MINZOOM = {6: 0, 7: 5, 8: 7, 9: 9}  # a poly level's polygons show from this map zoom until the next takes over
 MAP_MINZOOM   = 3                         # prevent zooming out past continent
-MAP_MAXZOOM   = 10                        # prevent excessive zoom (avoids missing-tile ugliness)
+MAP_MAXZOOM   = 11                        # allow enough zoom for L9 (finest) to have a real band
 RADAR_MAXZOOM = 7                         # radar raster native maxzoom; MapLibre overzooms beyond (no blank tiles)
 
-# Alert pins: every alerting basin (any level) drops a coloured dot at its centre,
-# visible at all zooms so flash-flood (L9) alerts are spottable from far out.
+# Alert pins: every alerting basin (severity levels only) drops a coloured dot at
+# its centre, visible at all zooms so flash-flood (L9) alerts are spottable from afar.
 PIN_LABELS = ["watch", "~10y", "~30y", ">=100y"]   # which severities get a pin
-PIN_RADIUS = {7: 9, 8: 6, 9: 4}                    # circle radius (px) by level: L7 large ... L9 small
-WINDOW_H    = 10.0                        # max rolling window retained in the store (hours)
+PIN_RADIUS = {8: 7, 9: 4}                          # circle radius (px) by level: L8 larger, L9 small
+WINDOW_H    = 12.0                        # max rolling window retained (h); must be >= max(ACC_WINDOWS_H)
 UPDATE_MIN  = 30                          # loop cadence; clamped to [15, 120] by run.py
 FRAME_INTERVAL_MIN = 10                   # RainViewer past-frame spacing
+
+# --- fixed accumulation windows (UI selector) -------------------------
+# Besides the severity computation (over each basin's own response time), every
+# served level also reports rainfall accumulated over these FIXED trailing
+# windows. The frontend lets the user pick one and colours basins by the
+# ACC_RAMP below. L6/L7 (no severity) are always coloured this way.
+ACC_WINDOWS_H = [2, 4, 8, 12]             # windows offered in the "Rain" view (hours)
+ACC_DEFAULT_H = 4                         # window used by default / when severity mode hits an accum-only level
+ACC_RAMP = [                              # (accumulated mm >=, colour), sequential blues
+    (0.5, "#d7ecf7"), (2.0, "#9ecae1"), (5.0, "#6baed6"), (10.0, "#4292c6"),
+    (20.0, "#2171b5"), (40.0, "#08519c"), (80.0, "#08306b"),
+]
 
 # --- Quantitative rainfall: RainViewer radar (sees convective cells) ---
 # Colour PNG tiles -> dbZ -> mm/h (Marshall-Palmer), then a CALIBRATION factor.

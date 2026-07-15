@@ -15,15 +15,13 @@
     <h1>FloodNowcasting.eu <span>2.0</span></h1>
     <p class="sub">Extreme-rainfall early warning · severity = rainfall return period at each basin's space–time scale</p>
     <label class="toggle"><input type="checkbox" id="radar" checked /> Live radar</label>
-    <div id="legend">
-      <div class="lg"><i style="background:#f03b20"></i> ≥ 100-y rainfall</div>
-      <div class="lg"><i style="background:#feb24c"></i> ~ 30-y</div>
-      <div class="lg"><i style="background:#ffeda0"></i> ~ 10-y</div>
-      <div class="lg"><i style="background:#c7e9b4"></i> watch (&lt; 10-y)</div>
-      <div class="lg"><i style="background:#4292c6"></i> rain (heavier)</div>
-      <div class="lg"><i style="background:#d7ecf7"></i> rain (light)</div>
+    <div id="view">
+      <div class="view-h">View</div>
+      <div id="view-opts"><!-- radios injected by app.js --></div>
+      <p class="view-note" id="view-note"></p>
     </div>
-    <p class="pins">● alert pins — dot size = basin level (L7 big · L8 · L9 small); click to zoom in</p>
+    <div id="legend"><!-- injected by app.js, adapts to the view mode --></div>
+    <p class="pins">● alert pins — severity levels only (L8 · L9 small); click to zoom in</p>
     <p id="status">loading…</p>
     <p id="level" class="lvl">basins: —</p>
     <p class="foot">Data: RainViewer (calibrated) · Poschlod 2021 · HydroBASINS · ARF De Michele 2001 · severity Ceresetti 2012. Rainfall warning, not a discharge forecast.</p>

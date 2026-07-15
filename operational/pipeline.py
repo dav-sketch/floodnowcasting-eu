@@ -206,9 +206,13 @@ def load_level(lv):
 
 def _write_manifest():
     man = {"levels": [{"level": lv, "minzoom": C.LEVEL_MINZOOM.get(lv, 0),
+                       "severity": lv in C.SEVERITY_LEVELS,
                        "geometry": f"catchments_L{lv}.geojson", "alerts": f"alerts_L{lv}.json"}
                       for lv in C.POLY_LEVELS],
            "pins": {"file": "pins.geojson", "radius": {str(k): v for k, v in C.PIN_RADIUS.items()}},
+           "acc": {"windows_h": C.ACC_WINDOWS_H, "default_h": C.ACC_DEFAULT_H,
+                   "ramp": [[mm, c] for mm, c in C.ACC_RAMP], "min_mm": C.RAIN_MIN_MM},
+           "severity_levels": C.SEVERITY_LEVELS,
            "map": {"minzoom": C.MAP_MINZOOM, "maxzoom": C.MAP_MAXZOOM},
            "radar_maxzoom": C.RADAR_MAXZOOM, "domain": C.DOMAIN_BBOX}
     (C.WEBDATA / "levels.json").write_text(json.dumps(man, indent=1))
@@ -276,6 +280,14 @@ def window_accumulate(store, hids, d_test):
         acc[i] = float(np.nansum(col[age_h <= dt]))
     return acc, span_h, now_t
 
+def fixed_window_accum(store, hids, windows_h):
+    """Per-basin rainfall sum over each FIXED trailing window (mm).
+    Returns {window_h: np.array over hids}. Each stored frame contributes once."""
+    times = store.index.to_numpy(dtype=float)
+    now_t = times.max(); age_h = (now_t - times) / 3600.0
+    arr = store.reindex(columns=hids).to_numpy(dtype=float)   # rows=frames, cols=basins (hids order)
+    return {w: np.nan_to_num(arr[age_h <= w, :]).sum(axis=0) for w in windows_h}
+
 # ----------------------------------------------------------------------
 # one cycle - decode each new frame ONCE, map it to every level
 # ----------------------------------------------------------------------
@@ -315,43 +327,76 @@ def run_once(verbose=True):
     return out
 
 def _severity_for_level(cat, store, host, past, lv):
+    is_sev = lv in C.SEVERITY_LEVELS
     if not len(store):
         if lv in C.POLY_LEVELS:
-            _write_level_alerts(cat.assign(acc_mm=0.0, coverage=0.0, ratio=0.0, T_years=0.0,
-                                           color="#2b8cbe22", label="none"),
-                                int(past[-1]["time"]), 0.0, 0, host, past, lv)
+            empty = cat.assign(**{f"acc_{w}h": 0.0 for w in C.ACC_WINDOWS_H})
+            empty = empty.assign(acc_mm=0.0, coverage=0.0, ratio=0.0, T_years=0.0,
+                                 color="#2b8cbe22", label="none")
+            _write_level_alerts(empty, int(past[-1]["time"]), 0.0, 0, host, past, lv)
         return {"wet": 0, "nalert": 0, "maxacc": 0.0, "maxT": 0.0}, []
-    dtest = cat["D_test_h"].to_numpy()
-    acc, span_h, now_t = window_accumulate(store, cat["HYBAS_ID"].tolist(), dtest)
-    cov = np.minimum(span_h, dtest) / dtest
+    hids = cat["HYBAS_ID"].tolist()
     cat = cat.copy()
-    cat["acc_mm"] = acc; cat["coverage"] = np.round(cov, 2)
-    cat["ratio"] = (cat["acc_mm"] / cat["thr_mm"].replace(0, np.nan)).fillna(0.0)
-    cat["T_years"] = cat["ratio"].apply(est_return_period)
-    cc = [classify(T, r, a) for T, r, a in zip(cat["T_years"], cat["ratio"], cat["acc_mm"])]
-    cat["color"] = [c for c, _ in cc]; cat["label"] = [l for _, l in cc]
+
+    # fixed-window accumulation (all served levels, drives the "Rain" view selector)
+    accw = fixed_window_accum(store, hids, C.ACC_WINDOWS_H)
+    for w in C.ACC_WINDOWS_H:
+        cat[f"acc_{w}h"] = np.round(accw[w], 1)
+
+    if is_sev:
+        # severity over each basin's OWN response time (the Ceresetti diagram method)
+        dtest = cat["D_test_h"].to_numpy()
+        acc, span_h, now_t = window_accumulate(store, hids, dtest)
+        cov = np.minimum(span_h, dtest) / dtest
+        cat["acc_mm"] = acc; cat["coverage"] = np.round(cov, 2)
+        cat["ratio"] = (cat["acc_mm"] / cat["thr_mm"].replace(0, np.nan)).fillna(0.0)
+        cat["T_years"] = cat["ratio"].apply(est_return_period)
+        cc = [classify(T, r, a) for T, r, a in zip(cat["T_years"], cat["ratio"], cat["acc_mm"])]
+        cat["color"] = [c for c, _ in cc]; cat["label"] = [l for _, l in cc]
+    else:
+        # accumulation-only level (L6/L7): no severity classification
+        times = store.index.to_numpy(dtype=float)
+        now_t = times.max(); span_h = (now_t - times.min()) / 3600.0
+        cat["acc_mm"] = 0.0; cat["coverage"] = 0.0; cat["ratio"] = 0.0
+        cat["T_years"] = 0.0; cat["color"] = "#2b8cbe22"; cat["label"] = "none"
+
     if lv in C.POLY_LEVELS:
         _write_level_alerts(cat, int(now_t), span_h, len(store), host, past, lv)
+
     pins = [{"type": "Feature",
              "geometry": {"type": "Point", "coordinates": [round(r.cen_x, 4), round(r.cen_y, 4)]},
              "properties": {"level": lv, "color": r.color, "label": r.label,
                             "T": round(r.T_years), "acc_mm": round(r.acc_mm, 1),
                             "thr_mm": round(r.thr_mm, 1), "HYBAS_ID": r.HYBAS_ID}}
-            for r in cat.itertuples() if r.label in C.PIN_LABELS]
-    return ({"wet": int((cat["acc_mm"] > 0.2).sum()),
+            for r in cat.itertuples() if r.label in C.PIN_LABELS] if is_sev else []
+
+    maxacc = float(cat[f"acc_{C.ACC_WINDOWS_H[-1]}h"].max())      # longest-window peak accumulation
+    return ({"wet": int((cat[f"acc_{C.ACC_WINDOWS_H[-1]}h"] > 0.2).sum()),
              "nalert": int(cat["label"].isin(["~10y", "~30y", ">=100y"]).sum()),
-             "maxacc": float(cat["acc_mm"].max()), "maxT": float(cat["T_years"].max())}, pins)
+             "maxacc": maxacc, "maxT": float(cat["T_years"].max())}, pins)
 
 def _write_pins(features):
     (C.WEBDATA / "pins.geojson").write_text(
         json.dumps({"type": "FeatureCollection", "features": features}))
 
 def _write_level_alerts(cat, now_t, span_h, n_frames, host, past, lv):
+    is_sev = lv in C.SEVERITY_LEVELS
     meta = {"generated_unix": int(now_t), "store_span_h": round(span_h, 2), "n_frames": int(n_frames),
-            "level": lv, "domain": C.DOMAIN_BBOX, "qpe": "rainviewer-calibrated",
+            "level": lv, "severity": is_sev, "acc_windows_h": C.ACC_WINDOWS_H,
+            "domain": C.DOMAIN_BBOX, "qpe": "rainviewer-calibrated",
             "cal_factor": C.CAL_FACTOR, "rainviewer_host": host, "rainviewer_path": past[-1]["path"]}
-    alerts = {r.HYBAS_ID: {"T": round(r.T_years), "ratio": round(r.ratio, 2),
-                           "acc_mm": round(r.acc_mm, 1), "color": r.color,
-                           "label": r.label, "coverage": r.coverage}
-              for r in cat.itertuples() if r.label != "none"}
+    # Include a basin if it has any measurable rain in any fixed window, or (on a
+    # severity level) it carries a severity label. acc = {window_h: mm}.
+    alerts = {}
+    for r in cat.itertuples():
+        acc = {str(w): getattr(r, f"acc_{w}h") for w in C.ACC_WINDOWS_H}
+        label = getattr(r, "label", "none")
+        if not (max(acc.values()) >= C.RAIN_MIN_MM or (is_sev and label != "none")):
+            continue
+        entry = {"acc": acc}
+        if is_sev:
+            entry.update({"T": round(r.T_years), "ratio": round(r.ratio, 2),
+                          "acc_mm": round(r.acc_mm, 1), "color": r.color,
+                          "label": label, "coverage": r.coverage})
+        alerts[r.HYBAS_ID] = entry
     _level_paths(lv)["alerts"].write_text(json.dumps({"meta": meta, "alerts": alerts}, indent=1))

@@ -1,29 +1,88 @@
 {
  "levels": [
   {
-   "level": 7,
+   "level": 6,
    "minzoom": 0,
+   "severity": false,
+   "geometry": "catchments_L6.geojson",
+   "alerts": "alerts_L6.json"
+  },
+  {
+   "level": 7,
+   "minzoom": 5,
+   "severity": false,
    "geometry": "catchments_L7.geojson",
    "alerts": "alerts_L7.json"
   },
   {
    "level": 8,
-   "minzoom": 8,
+   "minzoom": 7,
+   "severity": true,
    "geometry": "catchments_L8.geojson",
    "alerts": "alerts_L8.json"
+  },
+  {
+   "level": 9,
+   "minzoom": 9,
+   "severity": true,
+   "geometry": "catchments_L9.geojson",
+   "alerts": "alerts_L9.json"
   }
  ],
  "pins": {
   "file": "pins.geojson",
   "radius": {
-   "7": 9,
-   "8": 6,
+   "8": 7,
    "9": 4
   }
  },
+ "acc": {
+  "windows_h": [
+   2,
+   4,
+   8,
+   12
+  ],
+  "default_h": 4,
+  "ramp": [
+   [
+    0.5,
+    "#d7ecf7"
+   ],
+   [
+    2.0,
+    "#9ecae1"
+   ],
+   [
+    5.0,
+    "#6baed6"
+   ],
+   [
+    10.0,
+    "#4292c6"
+   ],
+   [
+    20.0,
+    "#2171b5"
+   ],
+   [
+    40.0,
+    "#08519c"
+   ],
+   [
+    80.0,
+    "#08306b"
+   ]
+  ],
+  "min_mm": 0.3
+ },
+ "severity_levels": [
+  8,
+  9
+ ],
  "map": {
   "minzoom": 3,
-  "maxzoom": 10
+  "maxzoom": 11
  },
  "radar_maxzoom": 7,
  "domain": [

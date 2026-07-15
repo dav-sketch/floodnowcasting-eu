@@ -42,11 +42,13 @@ a GitHub Actions cron. State is only a cache; each cycle is self-contained.
 | Knob | Meaning |
 |------|---------|
 | `DOMAIN_BBOX` | area of interest `(lon_min,lat_min,lon_max,lat_max)`; default all Europe |
-| `LEVELS` | HydroBASINS levels to compute & serve (LOD); default `[7, 8]` |
-| `LEVEL_MINZOOM` | map zoom at which each level's polygons appear (coarse→fine) |
-| `MAP_MINZOOM` / `MAP_MAXZOOM` | zoom caps (prevents blank-tile ugliness); default 3 / 10 |
+| `LEVELS` / `POLY_LEVELS` | HydroBASINS levels computed / served as zoom polygons (LOD); default `[6, 7, 8, 9]`. L6 = continental first view, L7 large, L8/L9 fine |
+| `SEVERITY_LEVELS` | levels that get severity classification; default `[8, 9]`. Others (L6/L7) are **accumulation-only** (severity is not meaningful for such large basins) |
+| `LEVEL_MINZOOM` | map zoom at which each level's polygons appear (coarse→fine); default `{6:0, 7:5, 8:7, 9:9}` |
+| `MAP_MINZOOM` / `MAP_MAXZOOM` | zoom caps (prevents blank-tile ugliness); default 3 / 11 |
 | `RADAR_MAXZOOM` | radar raster native maxzoom; MapLibre overzooms beyond it |
-| `WINDOW_H` | max accumulation window (h); default 10 |
+| `WINDOW_H` | max rolling window retained (h); default 12 (≥ longest `ACC_WINDOWS_H`) |
+| `ACC_WINDOWS_H` / `ACC_DEFAULT_H` / `ACC_RAMP` | fixed rainfall-accumulation windows offered in the "View" selector (`[2,4,8,12]` h), the default window, and the blue colour ramp |
 | `UPDATE_MIN` | loop cadence (15–120) |
 | `CAL_FACTOR` | radar calibration multiplier (~0.20); tune against local gauges |
 | `TILE_Z` | radar tile zoom (keep fixed once the store exists) |
@@ -55,10 +57,13 @@ a GitHub Actions cron. State is only a cache; each cycle is self-contained.
 
 ## Static webapp (`web/`)
 
-A dependency-light [MapLibre GL](https://maplibre.org) site. It loads the catchment
-geometry **once** (`web/data/catchments.geojson`, static, ~simplified) and polls the
-tiny `web/data/alerts.json` (rewritten each cycle) to colour basins by severity, with
-the live RainViewer radar as an overlay. Nothing but static files → $0 hosting.
+A dependency-light [MapLibre GL](https://maplibre.org) site. Per-level catchment
+geometry (`web/data/catchments_L{6,7,8,9}.geojson`, static, simplified) is
+**lazy-loaded** as you zoom into each band, and the tiny per-level
+`alerts_L*.json` (rewritten each cycle) is joined client-side. A **View** selector
+switches basin colouring between **severity** (L8/L9 only) and **rainfall
+accumulated over a chosen fixed window** (2/4/8/12 h, all levels), with the live
+RainViewer radar as an independent overlay. Nothing but static files → $0 hosting.
 
 **Preview locally:**
 ```bash
