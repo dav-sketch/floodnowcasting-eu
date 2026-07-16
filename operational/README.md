@@ -16,9 +16,12 @@ of Ceresetti et al. (2012, *Weather and Forecasting*).
    **rolling per-catchment table**, so 6–10 h windows build up over successive runs
    (RainViewer exposes only ~2 h per call).
 2. **Accumulate** each basin's areal-average rain over **its own response time**
-   `t_lag ≈ 0.9·UP_AREA^0.38 h`, capped at `WINDOW_H`.
-3. **Threshold** — Poschlod et al. (2021) 10-y sub-daily return level, log-log
-   interpolated to the basin's duration, reduced to catchment-areal by the
+   `t_lag ≈ 0.9·UP_AREA^0.38 h`, capped at `WINDOW_H` and **rounded to whole hours**
+   (`D_ddf_h`); the same window is used for the observation and the threshold.
+3. **Threshold** — 10-y **Depth-Duration-Frequency** level at the basin's duration
+   from the user log-log DDF fit (`IDF/IDF_loglogParameters.txt`, nearest EURO-CORDEX
+   grid point): `depth(mm) = 10**(a·log10(D_h)+b)`. `a,b` are fit on the 3–24 h
+   10-y levels (de-biases the raw 1 h). Reduced to catchment-areal by the
    **De Michele–Kottegoda–Rosso (2001)** ARF `[1+ϖ(A*^z/T)^b]^(−v/b)`.
 4. **Severity** — ratio (areal rain / areal 10-y level) → return period via a
    growth curve (`RP_ANCHORS`, Geneva-like default). Colours: ~10 y → ~30 y → ≥100 y.

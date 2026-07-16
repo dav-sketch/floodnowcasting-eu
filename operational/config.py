@@ -62,6 +62,16 @@ ACC_RAMP = [                              # (accumulated mm >=, colour), sequent
 # CAL_FACTOR was tuned so decoded cell depths match observations/gauges:
 # Bucharest convective cells -> 0.22, Swiss stratiform vs Open-Meteo -> 0.21.
 # A single ~0.20 multiplier fixes the systematic tile over-read in both regimes.
+# --- Depth-Duration-Frequency (DDF) 10-year thresholds ----------------
+# User-provided log-log DDF fit on the EURO-CORDEX grid (IDF/ folder). Per grid
+# point: a (slope) & b (intercept), with 10-y depth(mm) = 10**(a*log10(D_h)+b).
+# a,b were fit on the 3-24 h Poschlod 10-y levels (this de-biases the raw 1 h).
+# This REPLACES the Poschlod point threshold for the severity computation
+# (nearest grid point; ARF is still applied). Read only at precompute time -
+# the baked thr_mm lives in the committed attrs/geometry, so cycles don't need it.
+DDF_FILE = BASE / "IDF" / "IDF_loglogParameters.txt"
+DDF_D_MIN_H, DDF_D_MAX_H = 1.0, 24.0     # clamp response time to the DDF fit domain
+
 RV_JSON = "https://api.rainviewer.com/public/weather-maps.json"
 CAL_FACTOR = 0.20                         # <-- radar calibration (tune vs local gauges)
 RAIN_ALPHA_MIN = 120

@@ -61,7 +61,7 @@ const state = { mode: "severity", window: 4 };               // current View sel
       map.addLayer({ id: "line" + L.level, type: "line", source: "basins" + L.level,
         minzoom: zmin, maxzoom: zmax,
         paint: { "line-color": "#5b6b77", "line-width": 0.4, "line-opacity": 0.5 } });
-      wirePopup(map, "fill" + L.level);
+      wirePopup(map, "fill" + L.level, L.level);
     });
 
     // alert pins (severity levels only) — coloured dot at each alerting basin's
@@ -132,7 +132,8 @@ function wirePins(map) {
     new maplibregl.Popup().setLngLat(e.lngLat).setHTML(
       `<b>Alert · level ${p.level}</b><br>Severity: <b>${sevLabel(p.label)}</b>`
       + (p.T > 0 ? `<br>Est. return period: <b>${p.T} y</b>` : "")
-      + `<br>Rain ${p.acc_mm} mm · 10-y thr ${p.thr_mm} mm<br>Basin ${p.HYBAS_ID}`
+      + (p.D_ddf_h != null ? `<br>Response time: <b>${p.D_ddf_h} h</b>` : "")
+      + `<br>Rain over resp. time ${p.acc_mm} mm · 10-y level ${p.thr_mm} mm<br>Basin ${p.HYBAS_ID}`
     ).addTo(map);
     map.flyTo({ center: e.lngLat, zoom: Math.max(map.getZoom(), p.level >= 9 ? 10 : p.level >= 8 ? 9 : 7) });
   });
@@ -241,19 +242,25 @@ function wireRadarToggle(map) {
   });
 }
 
-function wirePopup(map, layer) {
+function wirePopup(map, layer, level) {
   map.on("click", layer, e => {
     const p = e.features[0].properties;
     const accLine = ACC.windows.map(w => `${w}h: <b>${(+p["acc_" + w] || 0).toFixed(1)}</b>`).join(" · ");
     let html = `<b>Basin ${p.HYBAS_ID}</b><br>`;
-    if (p.label && p.label !== "none" && p.T !== undefined) {   // severity level with a classification
-      html += `Severity: <b>${sevLabel(p.label)}</b><br>`
-        + (p.T > 0 ? `Est. return period: <b>${p.T} y</b><br>` : "")
-        + `Rain (areal, over response time): ${p.acc_mm ?? 0} mm · 10-y thr ${p.thr_mm} mm<br>`;
+    if (SEV.has(level)) {   // severity level: response-time comparison (obs vs 10-y DDF level)
+      const D = p.D_ddf_h != null ? p.D_ddf_h : Math.round(p.D_test_h);   // rounded response-time window (h)
+      const acc = +p.acc_mm || 0, thr = +p.thr_mm || 0;
+      const ratio = thr > 0 ? acc / thr : 0;
+      if (p.label && p.label !== "none") html += `Severity: <b>${sevLabel(p.label)}</b><br>`;
+      html += `Response time: <b>${D} h</b><br>`
+        + `Rain over ${D} h (areal): <b>${acc.toFixed(1)} mm</b><br>`
+        + `10-y level (${D} h, DDF): <b>${thr.toFixed(1)} mm</b><br>`
+        + `→ ratio <b>${ratio.toFixed(2)}</b>`
+        + (p.T > 0 ? ` · est. return period <b>${p.T} y</b>` : "") + `<br>`;
     }
     html += `Rain accumulation — ${accLine} mm<br>`
-      + `Warning lead ${p.t_lag_h} h · test ${p.D_test_h} h<br>`
-      + `Area ${p.UP_AREA} km² · ARF ${p.arf}`
+      + `Warning lead ${p.t_lag_h} h`
+      + `<br>Area ${p.UP_AREA} km² · ARF ${p.arf}`
       + (p.coverage != null && p.coverage < 1 ? `<br><i>coverage ${p.coverage} (partial window)</i>` : "");
     new maplibregl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
   });

@@ -46,7 +46,8 @@ def _tree(d):
     return _trees[d]
 
 def threshold_point_mm(lon, lat, D_h):
-    """Point 10-y level (mm) at arbitrary duration, log-log interpolated."""
+    """Point 10-y level (mm) at arbitrary duration, log-log interpolated.
+    (Poschlod-based; RETAINED for reference - severity now uses the DDF fit below.)"""
     depths = []
     for d in DURATIONS:
         tree, vals = _tree(d)
@@ -54,6 +55,42 @@ def threshold_point_mm(lon, lat, D_h):
     depths = np.array(depths)
     D = min(max(D_h, _DUR_H[0]), _DUR_H[-1])
     return float(np.exp(np.interp(np.log(D), np.log(_DUR_H), np.log(depths))))
+
+# ----------------------------------------------------------------------
+# DDF 10-year thresholds (user log-log fit; REPLACES Poschlod for severity)
+# ----------------------------------------------------------------------
+# Per EURO-CORDEX grid point the file gives a (slope) & b (intercept) of a
+# log10(depth) vs log10(duration) line fit on the 3-24 h 10-y levels. The 10-y
+# depth at the catchment response time D (h) is then
+#     depth(mm) = 10 ** (a * log10(D) + b)   ==   (10**b) * D**a .
+# a,b are fit on 3-24 h, so D is clamped to [DDF_D_MIN_H, DDF_D_MAX_H].
+_ddf = {}
+def _load_ddf():
+    if _ddf: return
+    f = C.DDF_FILE
+    if not f.exists():
+        raise FileNotFoundError(
+            f"DDF parameter file not found: {f}\n"
+            "It is required at precompute time (bakes the severity thresholds).")
+    d = np.genfromtxt(f, skip_header=1, delimiter="\t")   # cols: lat lon a b 1h_10y 24h_10y
+    d = d[~np.isnan(d).any(axis=1)]
+    from scipy.spatial import cKDTree
+    _ddf["tree"] = cKDTree(np.c_[d[:, 1], d[:, 0]])       # (lon, lat)
+    _ddf["a"], _ddf["b"] = d[:, 2], d[:, 3]
+    print(f"  loaded DDF: {len(d)} grid points "
+          f"(lat {d[:,0].min():.1f}..{d[:,0].max():.1f}, "
+          f"lon {d[:,1].min():.1f}..{d[:,1].max():.1f})")
+
+def ddf_depth_mm(lons, lats, D_h):
+    """Vectorised 10-y depth (mm) at per-point duration D_h from the nearest DDF
+    grid point. Accepts scalars or arrays; returns a float or np.ndarray."""
+    _load_ddf()
+    scalar = np.isscalar(lons)
+    lons = np.atleast_1d(np.asarray(lons, float)); lats = np.atleast_1d(np.asarray(lats, float))
+    D = np.clip(np.atleast_1d(np.asarray(D_h, float)), C.DDF_D_MIN_H, C.DDF_D_MAX_H)
+    _, idx = _ddf["tree"].query(np.c_[lons, lats])
+    depth = 10.0 ** (_ddf["a"][idx] * np.log10(D) + _ddf["b"][idx])
+    return float(depth[0]) if scalar else depth
 
 # ----------------------------------------------------------------------
 # hydrology / severity helpers
@@ -165,10 +202,13 @@ def _build_level(lv, glon, glat):
     g["HYBAS_ID"] = g["HYBAS_ID"].astype("int64").astype(str)
     g["t_lag_h"]  = g["UP_AREA"].apply(response_time_h)
     g["D_test_h"] = np.minimum(g["t_lag_h"], C.WINDOW_H)
+    # DDF duration = response time ROUNDED to whole hours (>=1, capped by WINDOW_H).
+    # This same window is used for the accumulation, so obs and threshold match.
+    g["D_ddf_h"]  = np.clip(np.round(g["D_test_h"]), 1.0, C.WINDOW_H)
     rp = g.geometry.representative_point()
     g["cen_x"], g["cen_y"] = rp.x.values, rp.y.values
-    g["arf"]    = [arf(a, d) for a, d in zip(g["UP_AREA"], g["D_test_h"])]
-    g["thr_pt"] = [threshold_point_mm(x, y, d) for x, y, d in zip(g.cen_x, g.cen_y, g.D_test_h)]
+    g["arf"]    = [arf(a, d) for a, d in zip(g["UP_AREA"], g["D_ddf_h"])]
+    g["thr_pt"] = ddf_depth_mm(g["cen_x"].to_numpy(), g["cen_y"].to_numpy(), g["D_ddf_h"].to_numpy())
     g["thr_mm"] = g["thr_pt"] * g["arf"]
 
     pts = gpd.GeoDataFrame(geometry=gpd.points_from_xy(glon.ravel(), glat.ravel()), crs="EPSG:4326")
@@ -192,8 +232,8 @@ def precompute(force=False):
     xr, yr, glon, glat = domain_grid()
     todo = [lv for lv in C.LEVELS if force or not _level_ready(lv)]
     if todo:
-        print("precompute: loading Poschlod ...")
-        _load_returnlevels()
+        print("precompute: loading DDF thresholds ...")
+        _load_ddf()
         print(f"precompute: grid {glon.shape}; building levels {todo} ...")
         for lv in todo:
             _build_level(lv, glon, glat)
@@ -219,10 +259,11 @@ def _write_manifest():
 
 def _export_web_geometry(g, lv, out):
     """Static, simplified catchment polygons for the web frontend (once per level)."""
-    w = g[["HYBAS_ID", "UP_AREA", "t_lag_h", "D_test_h", "thr_mm", "arf", "geometry"]].copy()
+    w = g[["HYBAS_ID", "UP_AREA", "t_lag_h", "D_test_h", "D_ddf_h", "thr_mm", "arf", "geometry"]].copy()
     w["geometry"] = w.geometry.simplify(C.SIMPLIFY.get(lv, 0.01), preserve_topology=True)
     for c in ["UP_AREA", "t_lag_h", "D_test_h", "thr_mm"]:
         w[c] = w[c].round(1)
+    w["D_ddf_h"] = w["D_ddf_h"].round(0).astype(int)
     w["arf"] = w["arf"].round(2)
     if out.exists(): out.unlink()
     try:
@@ -344,8 +385,9 @@ def _severity_for_level(cat, store, host, past, lv):
         cat[f"acc_{w}h"] = np.round(accw[w], 1)
 
     if is_sev:
-        # severity over each basin's OWN response time (the Ceresetti diagram method)
-        dtest = cat["D_test_h"].to_numpy()
+        # severity over each basin's OWN response time, rounded to whole hours
+        # (accumulation window == DDF duration used for thr_mm; the Ceresetti method)
+        dtest = cat["D_ddf_h"].to_numpy()
         acc, span_h, now_t = window_accumulate(store, hids, dtest)
         cov = np.minimum(span_h, dtest) / dtest
         cat["acc_mm"] = acc; cat["coverage"] = np.round(cov, 2)
@@ -367,7 +409,8 @@ def _severity_for_level(cat, store, host, past, lv):
              "geometry": {"type": "Point", "coordinates": [round(r.cen_x, 4), round(r.cen_y, 4)]},
              "properties": {"level": lv, "color": r.color, "label": r.label,
                             "T": round(r.T_years), "acc_mm": round(r.acc_mm, 1),
-                            "thr_mm": round(r.thr_mm, 1), "HYBAS_ID": r.HYBAS_ID}}
+                            "thr_mm": round(r.thr_mm, 1), "D_ddf_h": int(r.D_ddf_h),
+                            "HYBAS_ID": r.HYBAS_ID}}
             for r in cat.itertuples() if r.label in C.PIN_LABELS] if is_sev else []
 
     maxacc = float(cat[f"acc_{C.ACC_WINDOWS_H[-1]}h"].max())      # longest-window peak accumulation
