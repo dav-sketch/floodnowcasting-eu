@@ -173,10 +173,20 @@ def _get_tile(url, tries=3):
     return _BLANK
 
 def fetch_frame_rate(host, path, xr, yr):
-    cols = []
-    for tx in xr:
-        rows = [_get_tile(f"{host}{path}/256/{C.TILE_Z}/{tx}/{ty}/2/0_0.png") for ty in yr]
-        cols.append(np.concatenate(rows, axis=0))
+    """Decode one radar frame over the domain grid. Tiles are downloaded
+    CONCURRENTLY (I/O-bound), then assembled in the exact same row/col order."""
+    xr, yr = list(xr), list(yr)
+    coords = [(tx, ty) for tx in xr for ty in yr]
+    urls = [f"{host}{path}/256/{C.TILE_Z}/{tx}/{ty}/2/0_0.png" for tx, ty in coords]
+    workers = max(1, int(getattr(C, "TILE_WORKERS", 1)))
+    if workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            tiles = list(ex.map(_get_tile, urls))
+    else:
+        tiles = [_get_tile(u) for u in urls]
+    grid = dict(zip(coords, tiles))
+    cols = [np.concatenate([grid[(tx, ty)] for ty in yr], axis=0) for tx in xr]
     return _decode(np.concatenate(cols, axis=1))
 
 def rainviewer_frames():
@@ -312,13 +322,17 @@ def prune_store(store, window_h):
 
 def window_accumulate(store, hids, d_test):
     """Per-basin rainfall sum over each basin's trailing D_test window (mm),
-    plus (span_h, now_t). Each stored frame contributes exactly once."""
+    plus (span_h, now_t). Each stored frame contributes exactly once.
+    Vectorised: d_test takes only a few integer-hour values, so we sum once per
+    distinct window instead of looping over every basin."""
     times = store.index.to_numpy(dtype=float)
     now_t = times.max(); age_h = (now_t - times) / 3600.0; span_h = (now_t - times.min()) / 3600.0
+    d_test = np.asarray(d_test, dtype=float)
+    arr = np.nan_to_num(store.reindex(columns=list(hids)).to_numpy(dtype=float))  # rows=frames, cols=basins
     acc = np.zeros(len(hids))
-    for i, (hid, dt) in enumerate(zip(hids, d_test)):
-        col = store[hid].to_numpy(dtype=float)
-        acc[i] = float(np.nansum(col[age_h <= dt]))
+    for dt in np.unique(d_test):
+        cols = np.where(d_test == dt)[0]
+        acc[cols] = arr[np.ix_(age_h <= dt, cols)].sum(axis=0)
     return acc, span_h, now_t
 
 def fixed_window_accum(store, hids, windows_h):
@@ -386,15 +400,29 @@ def _severity_for_level(cat, store, host, past, lv):
 
     if is_sev:
         # severity over each basin's OWN response time, rounded to whole hours
-        # (accumulation window == DDF duration used for thr_mm; the Ceresetti method)
-        dtest = cat["D_ddf_h"].to_numpy()
-        acc, span_h, now_t = window_accumulate(store, hids, dtest)
+        # (accumulation window == DDF duration used for thr_mm; the Ceresetti method).
+        # WET GATE: only basins with >= SEVERITY_MIN_MM in the longest fixed window
+        # get the (per-basin) response-time math. That window upper-bounds the
+        # response-time accumulation, so the dry majority we skip cannot alert.
+        n = len(hids)
+        dtest = cat["D_ddf_h"].to_numpy(); thr = cat["thr_mm"].to_numpy()
+        times = store.index.to_numpy(dtype=float)
+        now_t = times.max(); span_h = (now_t - times.min()) / 3600.0
+        acc = np.zeros(n); ratio = np.zeros(n); T = np.zeros(n)
+        color = np.full(n, "#2b8cbe22", dtype=object); label = np.full(n, "none", dtype=object)
+        wet = np.where(accw[C.ACC_WINDOWS_H[-1]] >= C.SEVERITY_MIN_MM)[0]
+        if wet.size:
+            acc[wet], span_h, now_t = window_accumulate(store, [hids[i] for i in wet], dtest[wet])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio[wet] = np.where(thr[wet] > 0, acc[wet] / thr[wet], 0.0)
+            T[wet] = [est_return_period(r) for r in ratio[wet]]
+            cc = [classify(t_, r_, a_) for t_, r_, a_ in zip(T[wet], ratio[wet], acc[wet])]
+            for k, i in enumerate(wet):
+                color[i], label[i] = cc[k]
         cov = np.minimum(span_h, dtest) / dtest
         cat["acc_mm"] = acc; cat["coverage"] = np.round(cov, 2)
-        cat["ratio"] = (cat["acc_mm"] / cat["thr_mm"].replace(0, np.nan)).fillna(0.0)
-        cat["T_years"] = cat["ratio"].apply(est_return_period)
-        cc = [classify(T, r, a) for T, r, a in zip(cat["T_years"], cat["ratio"], cat["acc_mm"])]
-        cat["color"] = [c for c, _ in cc]; cat["label"] = [l for _, l in cc]
+        cat["ratio"] = ratio; cat["T_years"] = T
+        cat["color"] = color; cat["label"] = label
     else:
         # accumulation-only level (L6/L7): no severity classification
         times = store.index.to_numpy(dtype=float)

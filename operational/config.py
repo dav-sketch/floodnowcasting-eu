@@ -74,6 +74,9 @@ DDF_D_MIN_H, DDF_D_MAX_H = 1.0, 24.0     # clamp response time to the DDF fit do
 
 RV_JSON = "https://api.rainviewer.com/public/weather-maps.json"
 CAL_FACTOR = 0.20                         # <-- radar calibration (tune vs local gauges)
+TILE_WORKERS = 16                         # concurrent radar-tile downloads per frame
+                                          # (the domain is ~156 tiles/frame; sequential
+                                          # fetch was the main runtime cost). 0/1 = serial.
 RAIN_ALPHA_MIN = 120
 ZR_A, ZR_B = 200.0, 1.6                   # Marshall-Palmer Z = A*R^B
 DBZ_MAX = 53.0                            # clip hail tail
@@ -107,6 +110,12 @@ ARF_A0_KM2 = 156.0
 RP_ANCHORS  = [(1.0, 10), (1.2, 30), (1.4, 100)]
 RP_COLORS   = [(10, "#ffeda0", "~10y"), (30, "#feb24c", "~30y"), (100, "#f03b20", ">=100y")]
 WATCH_RATIO = 0.8
+# Skip the (per-basin) response-time severity math for basins whose LONGEST fixed
+# window holds less than this much rain. The longest window (>= any response time)
+# bounds the response-time accumulation from above, so this never hides an alert:
+# a basin needs tens of mm to reach WATCH_RATIO of its 10-y level. Big speed-up
+# because the dry majority skips the classification loop entirely.
+SEVERITY_MIN_MM = 10.0
 
 # Rainfall shading for WET-but-below-watch basins, so ordinary rain is visible
 # (not just extreme alerts). (accumulated mm >=, colour), pale -> blue.

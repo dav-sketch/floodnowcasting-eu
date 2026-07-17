@@ -9,6 +9,7 @@
 // Live radar from RainViewer. Zoom is capped so tiles never blank.
 
 const REFRESH_MS = 120000;
+const RAINVIEWER_JSON = "https://api.rainviewer.com/public/weather-maps.json";  // live radar (client-side)
 const NONE_COLOR = "rgba(0,0,0,0)";
 const geos = {};          // level -> base GeoJSON once loaded
 const loaded = {};        // level -> bool
@@ -122,8 +123,9 @@ async function refresh(map) {
     const pins = await (await fetch("data/" + manifest.pins.file, { cache: "no-store" })).json();
     map.getSource("pins").setData(pins);
   } catch (e) { /* no pins yet */ }
-  if (radarMeta) updateRadar(map, radarMeta);
-  setStatus(`${total} basin alert${total === 1 ? "" : "s"} · updated ${when}`);
+  const radarTime = await updateRadar(map, radarMeta);          // live radar (baked meta = fallback)
+  const radarStr = radarTime ? new Date(radarTime * 1000).toUTCString().replace("GMT", "UTC") : "?";
+  setStatus(`${total} basin alert${total === 1 ? "" : "s"} · radar ${radarStr} · rain overlay ${when}`);
 }
 
 function wirePins(map) {
@@ -225,15 +227,30 @@ function renderLegend() {
   }
 }
 
-function updateRadar(map, meta) {
-  if (!meta.rainviewer_host) return;
-  const url = `${meta.rainviewer_host}${meta.rainviewer_path}/256/{z}/{x}/{y}/2/1_1.png`;
+// Radar raster is fetched LIVE in the browser (not from the baked alerts meta),
+// so it stays current on every refresh regardless of how often the cron runs.
+// The baked meta (rainviewer_host/path from the last deploy) is only a fallback.
+// Returns the live frame's UNIX time (or null) so the caller can show its age.
+async function updateRadar(map, fallbackMeta) {
+  let host = null, path = null, frameTime = null;
+  try {
+    const j = await (await fetch(RAINVIEWER_JSON, { cache: "no-store" })).json();
+    const past = (j.radar && j.radar.past) || [], now = (j.radar && j.radar.nowcast) || [];
+    const frame = past.length ? past[past.length - 1] : (now.length ? now[0] : null);
+    if (j.host && frame) { host = j.host; path = frame.path; frameTime = frame.time; }
+  } catch (e) { /* offline / CORS -> fall back to the baked frame below */ }
+  if (!path && fallbackMeta && fallbackMeta.rainviewer_host) {   // fallback: last deployed frame
+    host = fallbackMeta.rainviewer_host; path = fallbackMeta.rainviewer_path;
+  }
+  if (!host || !path) return null;
+  const url = `${host}${path}/256/{z}/{x}/{y}/2/1_1.png`;
   if (map.getLayer("radar")) { map.removeLayer("radar"); map.removeSource("radar"); }
   map.addSource("radar", { type: "raster", tileSize: 256, maxzoom: manifest.radar_maxzoom, tiles: [url] });
   map.addLayer({ id: "radar", type: "raster", source: "radar", paint: { "raster-opacity": 0.45 } },
                "fill" + LV[0].level);
   const on = document.getElementById("radar").checked;
   map.setLayoutProperty("radar", "visibility", on ? "visible" : "none");
+  return frameTime;
 }
 function wireRadarToggle(map) {
   document.getElementById("radar").addEventListener("change", e => {

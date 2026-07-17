@@ -14,7 +14,8 @@ of Ceresetti et al. (2012, *Weather and Forecasting*).
    flash floods. `CAL_FACTOR≈0.20` fixes the tile over-read (tuned on Bucharest
    convective cells and Swiss stratiform — both gave ~0.2). Frames are stored in a
    **rolling per-catchment table**, so 6–10 h windows build up over successive runs
-   (RainViewer exposes only ~2 h per call).
+   (RainViewer exposes only ~2 h per call). Tiles (~156/frame) are downloaded
+   **concurrently** (`TILE_WORKERS`) — this was the dominant per-cycle cost.
 2. **Accumulate** each basin's areal-average rain over **its own response time**
    `t_lag ≈ 0.9·UP_AREA^0.38 h`, capped at `WINDOW_H` and **rounded to whole hours**
    (`D_ddf_h`); the same window is used for the observation and the threshold.
@@ -25,6 +26,8 @@ of Ceresetti et al. (2012, *Weather and Forecasting*).
    **De Michele–Kottegoda–Rosso (2001)** ARF `[1+ϖ(A*^z/T)^b]^(−v/b)`.
 4. **Severity** — ratio (areal rain / areal 10-y level) → return period via a
    growth curve (`RP_ANCHORS`, Geneva-like default). Colours: ~10 y → ~30 y → ≥100 y.
+   Computed only for basins with ≥ `SEVERITY_MIN_MM` in the longest fixed window
+   (that window bounds the response-time accumulation, so no alert is missed).
 5. **Outputs** — `out/alerts.geojson`, `out/alerts.json`, `out/map.html`
    (basins over the RainViewer radar visual layer).
 
