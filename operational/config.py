@@ -94,14 +94,58 @@ PALETTE = [
 OM_URL = "https://api.open-meteo.com/v1/forecast"
 
 # --- Areal Reduction Factor: De Michele, Kottegoda & Rosso (2001) ------
-# ARF(A,T) = [1 + varpi*(A*^z / T)^b]^(-v/b), A* = max(A-A0,0) km2, T in h.
-# (= Eq. 3 of Ceresetti et al. 2012, WAF, the severity-diagram paper.)
-# z = a/b where a is the area-decay exponent. Pick the fit for your region:
-ARF_VARPI, ARF_B, ARF_Z, ARF_V = 0.011,   0.40, 0.70,        0.70    # UK/NERC (broad, pan-EU default)
-# ARF_VARPI, ARF_B, ARF_Z, ARF_V = 0.0905,  0.540, 1.0,        0.484   # Milan (urban)
-# ARF_VARPI, ARF_B, ARF_Z, ARF_V = 0.00632, 0.34,  0.55/0.34,  0.84    # Cevennes flat  (Ceresetti 2012 T.1)
-# ARF_VARPI, ARF_B, ARF_Z, ARF_V = 0.00234, 0.14,  0.52/0.14,  0.64    # Cevennes mountain (Ceresetti 2012 T.1)
-ARF_A0_KM2 = 156.0
+# WRR 37(12):3247-3252 Eq. 14 == Eq. 3 of Ceresetti et al. 2012 (WAF 27:162-179),
+# the severity-diagram paper this app implements:
+#
+#       ARF(A, D) = [ 1 + varpi * A**a / D**b ] ** (-v / b)
+#
+# A = area (km2) the rainfall is averaged over, D = duration (h); `a` is the
+# area-decay exponent, `b` the duration exponent, v the point-rainfall time
+# exponent. Both papers ALSO quote the dynamic-scaling exponent z = a / b
+# (i.e. a = z*b) - an easy trap, because De Michele's UK table quotes z = 0.70
+# with b = 0.40, which means the area exponent is only a = 0.28.
+#
+# Published parameter sets, as (varpi, a, b, v):
+ARF_SETS = {
+    # De Michele et al. 2001 fit to the NERC Flood Studies Report (UK).
+    # Fitted across 1 min-25 days and 1-18000 km2, BUT the FSR tables only pair
+    # large areas with long durations, so at this app's scales (1-12 h over
+    # 1e2-1e4 km2) it extrapolates and barely reduces anything: ARF 0.86-0.98,
+    # i.e. an almost inert areal correction. Kept for reference/comparison.
+    "uk_nerc":           (0.011,   0.28,  0.40,  0.70),
+    # De Michele et al. 2001 fit to the Milan gauge network: 0.25-300 km2 and
+    # 20 min-6 h, z = 1 so a = b = 0.540. Very steep - small urban areas only.
+    "milan_urban":       (0.0905,  0.540, 0.540, 0.484),
+    # Ceresetti et al. 2012 Table 1, Cevennes-Vivarais radar+gauge, fitted on
+    # areas >= 50 km2 and durations >= 2 h - exactly the scales used here, and
+    # the parameters of the severity-diagram method itself. DEFAULT.
+    "cevennes_flat":     (0.00632, 0.55,  0.34,  0.84),
+    "cevennes_mountain": (0.00234, 0.52,  0.14,  0.64),
+}
+ARF_SET = "cevennes_flat"
+# Sanity: at A = 5000 km2, D = 12 h this gives ARF 0.53 (uk_nerc gave 0.93), so a
+# large-basin event is scored roughly twice as severe as before - which is the
+# behaviour Ceresetti et al. 2012 Fig. 4 shows. Print pipeline.arf_table() to
+# see the full grid, or set ARF_SET = "uk_nerc" to reproduce the old numbers.
+
+# Which HydroBASINS area column feeds the ARF. The severity test is "areal
+# observation over area A vs areal 10-y quantile over the SAME A", so this must
+# be the area the radar accumulation is actually averaged over - the basin
+# polygon, i.e. SUB_AREA. (UP_AREA is the whole upstream drainage: ~4x larger
+# than SUB_AREA at level 9 on average and up to 1.4e6 km2 on the Danube/Volga
+# trunks, where a properly steep ARF collapses to ~0.01 and would manufacture
+# permanent false alarms. See README "Known limitations" for the flip side:
+# the accumulation is local-polygon only, while t_lag still uses UP_AREA.)
+ARF_AREA_FIELD = "SUB_AREA"
+
+# The DDF/Poschlod "point" value is not a point: it is a 0.11 deg (~12.5 km,
+# ~156 km2) grid-cell mean, so it already carries some areal averaging.
+# De Michele's Eq. 2 defines the ARF relative to that reference area, so we use
+#       ARF_used(A, D) = min( ARF(A, D) / ARF(A_ref, D), 1 )
+# which correctly returns 1.0 for a basin the size of one grid cell. (The old
+# code instead subtracted the reference area, A* = A - A0, which is the paper's
+# rain-gauge-orifice form and is not the right reduction at 156 km2.)
+ARF_REF_AREA_KM2 = 156.0
 
 # --- Severity: ratio -> return period (Ceresetti et al. 2012) ---------
 # The colour of each basin IS its "severity" = return period at its own

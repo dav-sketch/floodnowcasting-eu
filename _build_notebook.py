@@ -60,6 +60,12 @@ BBOX = (5.5, 45.0, 8.0, 47.0)            # (lon_min, lat_min, lon_max, lat_max) 
 HYBAS_LEVEL = 9                           # 6 (large) .. 12 (small). 9 = good regional detail.
 TILE_Z = 7                                # radar tile zoom for the AOI (higher = finer, more tiles)
 
+# --- CARTO basemap (Leaflet/folium needs the account key as ?key=) -----
+# Client-side key: it ends up in the rendered HTML, so treat it as public and
+# restrict it by domain in the CARTO dashboard.
+CARTO_KEY   = "cb1_2m94_1_5b4bc8e0e0b4cfa6fa589a43"
+CARTO_STYLE = "light_all"                 # or "rastertiles/voyager"
+
 # --- Colours = estimated rainfall return period -----------------------
 # ratio = areal accumulation / (10-y areal level). Map ratio -> return period T
 # via a growth curve anchored on (ratio, years). Defaults are Geneva-like
@@ -69,13 +75,22 @@ RP_COLORS   = [(10, "#ffeda0", "~10y"), (30, "#feb24c", "~30y"), (100, "#f03b20"
 WATCH_RATIO = 0.8                          # below the 10-y level but worth watching (green)
 
 # --- Areal Reduction Factor: De Michele, Kottegoda & Rosso (2001) -----
-# WRR 37(12):3247-3252, scaling-based ARF (their Eq. 14):
-#   ARF(A,T) = [ 1 + varpi * (A*^z / T)^b ] ^ (-v/b)
-# A* = max(A - A0, 0) km2  (A0 = reference "point" area), T in h. Areal thr =
-# point IDF * ARF. Default = UK/NERC fit (areas 1-18000 km2, wide durations).
-ARF_VARPI, ARF_B, ARF_Z, ARF_V = 0.011, 0.40, 0.70, 0.70    # UK/NERC fit
-# ARF_VARPI, ARF_B, ARF_Z, ARF_V = 0.0905, 0.540, 1.0, 0.484  # Milan (urban) fit
-ARF_A0_KM2 = 156.0        # Poschlod cells ~12.5 km (~156 km2): already areal
+# WRR 37(12):3247-3252 Eq. 14 == Ceresetti et al. 2012 (WAF) Eq. 3:
+#   ARF(A,D) = [ 1 + varpi * A^a / D^b ] ^ (-v/b)     A in km2, D in h
+# `a` is the AREA exponent; both papers also quote the dynamic-scaling
+# exponent z = a/b, so a = z*b (De Michele's UK z=0.70, b=0.40 -> a=0.28).
+ARF_SETS = {                        # (varpi, a, b, v)
+    "uk_nerc":           (0.011,   0.28,  0.40,  0.70),   # FSR UK; nearly flat in area
+    "milan_urban":       (0.0905,  0.540, 0.540, 0.484),  # 0.25-300 km2 only
+    "cevennes_flat":     (0.00632, 0.55,  0.34,  0.84),   # Ceresetti 2012 T.1, A>=50 km2, D>=2h
+    "cevennes_mountain": (0.00234, 0.52,  0.14,  0.64),
+}
+ARF_SET = "cevennes_flat"   # the severity-diagram method's own ARF; "uk_nerc"
+                            # barely reduces anything at 1-12 h / 1e2-1e4 km2
+ARF_REF_AREA_KM2 = 156.0    # Poschlod cells ~12.5 km (~156 km2) are already areal,
+                            # so ARF is normalised by ARF(156 km2, D) (Eq. 2)
+ARF_AREA_FIELD = "SUB_AREA" # ARF uses the area the rain is averaged over (the
+                            # polygon), not the upstream drainage UP_AREA
 
 # --- RainViewer decode (THE calibration knobs) ------------------------
 RAIN_ALPHA_MIN = 120     # ignore tile pixels more transparent than this (haze/no-data)
@@ -171,8 +186,22 @@ Each HydroBASINS polygon gets a **response / lag time** from its upstream area
 - **Warning lead time** we can advertise = `t_lag`.
 - The point 10-y IDF (log-log interpolated to `D_test`) becomes a **catchment-areal**
   threshold via the **Areal Reduction Factor** of De Michele, Kottegoda & Rosso
-  (2001), `ARF = [1 + ϖ(A*^z/T)^b]^(−v/b) ≤ 1`, so `thr_areal = thr_point · ARF`.
-  `A* = A − A₀` with `A₀ ≈ 156 km²` (a Poschlod cell is already areal, ~12.5 km).
+  (2001, Eq. 14) = Ceresetti et al. (2012, Eq. 3):
+  `ARF(A,D) = [1 + ϖ·A^a / D^b]^(−v/b) ≤ 1`, so `thr_areal = thr_point · ARF`.
+
+  Two things are easy to get wrong here, and both were:
+  1. `a` is the **area** exponent. The papers also quote the dynamic-scaling
+     exponent `z = a/b`, so De Michele's UK/NERC row (`z = 0.70, b = 0.40`) means
+     `a = 0.28` — almost no decay with area (ARF ≈ 0.93 at 5000 km²/12 h). The
+     **Cévennes** fit of Ceresetti et al. 2012 (`a = 0.55, b = 0.34`) was made on
+     `A ≥ 50 km²` and `D ≥ 2 h`, i.e. exactly these scales, and gives **ARF ≈ 0.53**
+     there. That is the set used now.
+  2. `A` must be the area the rainfall is **averaged over** — the basin polygon
+     (`SUB_AREA`) — not the upstream drainage (`UP_AREA`).
+
+  Because a Poschlod cell (0.11°, ~156 km²) is itself an areal mean, the ARF is
+  normalised as `ARF(A,D)/ARF(156 km², D)` (De Michele's Eq. 2), so a basin the
+  size of one cell correctly gets `ARF = 1`.
 
 `coverage = radar window / t_lag` shows how much of the basin's response the ~2-h
 radar record spans — small for big basins until we add a live accumulation store.""")
@@ -180,13 +209,18 @@ code(r'''def response_time_h(area_km2):
     # coarse regional scaling; ~1h at 10 km2 .. ~24h at ~1e4 km2
     return float(max(0.5, 0.9 * (max(area_km2, 1.0) ** 0.38)))
 
+_AW, _AA, _AB, _AV = ARF_SETS[ARF_SET]
+
+def arf_raw(area_km2, D_h):
+    """De Michele-Kottegoda-Rosso (2001) Eq. 14 / Ceresetti et al. (2012) Eq. 3."""
+    A = np.maximum(np.asarray(area_km2, float), 0.0)
+    D = np.maximum(np.asarray(D_h, float), 0.05)
+    return (1.0 + _AW * A**_AA / D**_AB) ** (-_AV/_AB)
+
 def arf(area_km2, D_h):
-    """De Michele-Kottegoda-Rosso (2001) areal reduction factor in (0,1]."""
-    A_star = max(area_km2 - ARF_A0_KM2, 0.0)     # <= A0 -> point/grid scale -> 1
-    if A_star <= 0.0:
-        return 1.0
-    base = 1.0 + ARF_VARPI * (A_star**ARF_Z / max(D_h, 0.05))**ARF_B
-    return float(min(1.0, base**(-ARF_V/ARF_B)))
+    """ARF in (0,1], normalised so that one Poschlod grid cell -> 1.0."""
+    out = np.minimum(arf_raw(area_km2, D_h) / arf_raw(ARF_REF_AREA_KM2, D_h), 1.0)
+    return out if np.ndim(out) else float(out)
 
 _ra = np.array([a for a,_ in RP_ANCHORS]); _rlnT = np.log([t for _,t in RP_ANCHORS])
 def est_return_period(ratio):
@@ -212,7 +246,7 @@ def load_catchments(level, bbox, window_h):
     rp = g.geometry.representative_point()            # NB: g.cx is GeoPandas' coord indexer, not a column
     g["cen_x"] = rp.x.values
     g["cen_y"] = rp.y.values
-    g["arf"]    = [arf(a,d) for a,d in zip(g["UP_AREA"], g["D_test_h"])]
+    g["arf"]    = arf(g[ARF_AREA_FIELD].to_numpy(), g["D_test_h"].to_numpy())
     g["thr_pt"] = [threshold_point_mm(x,y,d) for x,y,d in zip(g["cen_x"],g["cen_y"],g["D_test_h"])]
     g["thr_mm"] = g["thr_pt"] * g["arf"]              # areal 10-y level
     return g.reset_index(drop=True)
@@ -371,7 +405,7 @@ def classify(T, ratio):
 cls = pd.DataFrame([classify(T,r) for T,r in zip(cat["T_years"], cat["ratio"])], index=cat.index)
 cat = cat.join(cls)
 
-cols=["HYBAS_ID","UP_AREA","t_lag_h","D_test_h","coverage","arf","thr_mm","acc_mean","ratio","T_years","label"]
+cols=["HYBAS_ID","SUB_AREA","UP_AREA","t_lag_h","D_test_h","coverage","arf","thr_mm","acc_mean","ratio","T_years","label"]
 cat.sort_values("ratio", ascending=False)[cols].round(2).head(12)
 ''')
 
@@ -379,7 +413,17 @@ cat.sort_values("ratio", ascending=False)[cols].round(2).head(12)
 md("## 5 — Interactive map: coloured catchments over live radar")
 code(r'''import folium
 c = [ (BBOX[1]+BBOX[3])/2, (BBOX[0]+BBOX[2])/2 ]
-m = folium.Map(location=c, zoom_start=TILE_Z, tiles="CartoDB positron")
+
+# CARTO basemap. folium == Leaflet, and CARTO's raster basemaps now need an
+# account key passed as ?key=. folium's own tiles="CartoDB positron" shortcut
+# has no way to add it, so build the TileLayer explicitly.
+m = folium.Map(location=c, zoom_start=TILE_Z, tiles=None)
+folium.TileLayer(
+    tiles=f"https://{{s}}.basemaps.cartocdn.com/{CARTO_STYLE}/{{z}}/{{x}}/{{y}}.png?key={CARTO_KEY}",
+    attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+         ' contributors, &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    name="CARTO basemap", subdomains="abcd", max_zoom=20,
+    overlay=False, control=False).add_to(m)
 
 # live radar overlay (RainViewer tiles, smoothed for display)
 folium.TileLayer(
@@ -393,14 +437,14 @@ def style(feat):
             "fillOpacity":0.55 if on else 0.06}
 
 gj = cat.copy()
-for cc in ["UP_AREA","t_lag_h","D_test_h","thr_mm","acc_mean"]:
+for cc in ["SUB_AREA","UP_AREA","t_lag_h","D_test_h","thr_mm","acc_mean"]:
     gj[cc]=gj[cc].round(1)
 gj["arf"]=gj["arf"].round(2); gj["coverage"]=gj["coverage"].round(2)
 gj["ratio"]=gj["ratio"].round(2); gj["T_years"]=gj["T_years"].round(0)
 folium.GeoJson(
     gj.to_json(), name="Catchments", style_function=style,
     tooltip=folium.GeoJsonTooltip(
-        fields=["HYBAS_ID","label","T_years","t_lag_h","D_test_h","coverage","thr_mm","acc_mean","arf","ratio"],
+        fields=["HYBAS_ID","label","T_years","SUB_AREA","t_lag_h","D_test_h","coverage","thr_mm","acc_mean","arf","ratio"],
         aliases=["Basin","Alert","Est. T (y)","Warning (h)","Test dur (h)","Coverage",
                  "Areal 10-y thr (mm)","Areal rain (mm)","ARF","Ratio"])
 ).add_to(m)

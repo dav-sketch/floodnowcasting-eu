@@ -98,13 +98,31 @@ def ddf_depth_mm(lons, lats, D_h):
 def response_time_h(area_km2):
     return float(max(0.5, 0.9 * (max(area_km2, 1.0) ** 0.38)))
 
+_AW, _AA, _AB, _AV = C.ARF_SETS[C.ARF_SET]          # (varpi, a, b, v)
+
+def arf_raw(area_km2, D_h):
+    """De Michele-Kottegoda-Rosso (2001) Eq. 14 == Ceresetti et al. (2012) Eq. 3:
+        ARF(A,D) = [1 + varpi * A**a / D**b] ** (-v/b),   A in km2, D in h.
+    Vectorised; the areal exponent is `a` (NOT the dynamic-scaling z = a/b)."""
+    A = np.maximum(np.asarray(area_km2, float), 0.0)
+    D = np.maximum(np.asarray(D_h, float), 0.05)
+    return (1.0 + _AW * A**_AA / D**_AB) ** (-_AV / _AB)
+
 def arf(area_km2, D_h):
-    """De Michele-Kottegoda-Rosso (2001) areal reduction factor in (0,1]."""
-    A_star = max(area_km2 - C.ARF_A0_KM2, 0.0)
-    if A_star <= 0.0:
-        return 1.0
-    base = 1.0 + C.ARF_VARPI * (A_star**C.ARF_Z / max(D_h, 0.05))**C.ARF_B
-    return float(min(1.0, base**(-C.ARF_V / C.ARF_B)))
+    """ARF normalised to the DDF grid-cell area (config.ARF_REF_AREA_KM2), since
+    the 10-y "point" level is itself a ~156 km2 cell mean: a basin no bigger than
+    one cell gets 1.0, larger basins get a real reduction. Returns (0,1]."""
+    out = np.minimum(arf_raw(area_km2, D_h) / arf_raw(C.ARF_REF_AREA_KM2, D_h), 1.0)
+    return out if np.ndim(out) else float(out)
+
+def arf_table(areas=(50, 160, 500, 1000, 2000, 5000, 10000, 50000),
+              durations=(2, 4, 8, 12, 24)):
+    """Diagnostic: print the active ARF set over an area x duration grid."""
+    print(f"ARF set '{C.ARF_SET}' (varpi={_AW}, a={_AA}, b={_AB}, v={_AV}), "
+          f"referenced to {C.ARF_REF_AREA_KM2:.0f} km2, area from {C.ARF_AREA_FIELD}")
+    print("  A km2 | " + " ".join(f"{d:>6}h" for d in durations))
+    for A in areas:
+        print(f"  {A:6d} | " + " ".join(f"{arf(A, d):7.3f}" for d in durations))
 
 _ra = np.array([a for a, _ in C.RP_ANCHORS]); _rlnT = np.log([t for _, t in C.RP_ANCHORS])
 def est_return_period(ratio):
@@ -217,7 +235,11 @@ def _build_level(lv, glon, glat):
     g["D_ddf_h"]  = np.clip(np.round(g["D_test_h"]), 1.0, C.WINDOW_H)
     rp = g.geometry.representative_point()
     g["cen_x"], g["cen_y"] = rp.x.values, rp.y.values
-    g["arf"]    = [arf(a, d) for a, d in zip(g["UP_AREA"], g["D_ddf_h"])]
+    if C.ARF_AREA_FIELD not in g.columns:
+        raise KeyError(f"config.ARF_AREA_FIELD = {C.ARF_AREA_FIELD!r} is not a column of "
+                       f"{shp.name}; available: {sorted(g.columns)}")
+    # ARF over the area the radar accumulation is averaged over (the polygon).
+    g["arf"]    = arf(g[C.ARF_AREA_FIELD].to_numpy(), g["D_ddf_h"].to_numpy())
     g["thr_pt"] = ddf_depth_mm(g["cen_x"].to_numpy(), g["cen_y"].to_numpy(), g["D_ddf_h"].to_numpy())
     g["thr_mm"] = g["thr_pt"] * g["arf"]
 
@@ -244,6 +266,7 @@ def precompute(force=False):
     if todo:
         print("precompute: loading DDF thresholds ...")
         _load_ddf()
+        arf_table(areas=(160, 500, 2000, 10000), durations=(2, 6, 12))
         print(f"precompute: grid {glon.shape}; building levels {todo} ...")
         for lv in todo:
             _build_level(lv, glon, glat)
@@ -269,9 +292,10 @@ def _write_manifest():
 
 def _export_web_geometry(g, lv, out):
     """Static, simplified catchment polygons for the web frontend (once per level)."""
-    w = g[["HYBAS_ID", "UP_AREA", "t_lag_h", "D_test_h", "D_ddf_h", "thr_mm", "arf", "geometry"]].copy()
+    w = g[["HYBAS_ID", "UP_AREA", "SUB_AREA", "t_lag_h", "D_test_h", "D_ddf_h",
+           "thr_mm", "arf", "geometry"]].copy()
     w["geometry"] = w.geometry.simplify(C.SIMPLIFY.get(lv, 0.01), preserve_topology=True)
-    for c in ["UP_AREA", "t_lag_h", "D_test_h", "thr_mm"]:
+    for c in ["UP_AREA", "SUB_AREA", "t_lag_h", "D_test_h", "thr_mm"]:
         w[c] = w[c].round(1)
     w["D_ddf_h"] = w["D_ddf_h"].round(0).astype(int)
     w["arf"] = w["arf"].round(2)

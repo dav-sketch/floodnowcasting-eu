@@ -11,6 +11,22 @@
 const REFRESH_MS = 120000;
 const RAINVIEWER_JSON = "https://api.rainviewer.com/public/weather-maps.json";  // live radar (client-side)
 const NONE_COLOR = "rgba(0,0,0,0)";
+
+// ---- CARTO basemap ----------------------------------------------------
+// The CARTO raster basemaps now require an account key, appended to the tile
+// URL as a ?key= parameter. This is a *client-side* key: it is shipped to every
+// visitor's browser and is therefore public by design (like a Mapbox public
+// token) - restrict it by domain in the CARTO dashboard rather than hiding it.
+// CARTO_STYLE picks the basemap: "light_all" (pale, reads best under the
+// coloured basin fills) or "rastertiles/voyager" (CARTO's default colour map).
+const CARTO_KEY   = "cb1_2m94_1_5b4bc8e0e0b4cfa6fa589a43";
+const CARTO_STYLE = "light_all";
+const CARTO_TILES = ["a", "b", "c", "d"].map(
+  s => `https://${s}.basemaps.cartocdn.com/${CARTO_STYLE}/{z}/{x}/{y}.png?key=${CARTO_KEY}`);
+const CARTO_ATTR  =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, '
+  + '&copy; <a href="https://carto.com/attributions">CARTO</a>';
+
 const geos = {};          // level -> base GeoJSON once loaded
 const loaded = {};        // level -> bool
 const alertsCache = {};   // level -> alerts object
@@ -36,10 +52,8 @@ const state = { mode: "severity", window: 4 };               // current View sel
     style: {
       version: 8,
       sources: { carto: {
-        type: "raster", tileSize: 256, maxzoom: 19,
-        tiles: ["https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-                "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"],
-        attribution: "© OpenStreetMap contributors © CARTO" } },
+        type: "raster", tileSize: 256, maxzoom: 20,
+        tiles: CARTO_TILES, attribution: CARTO_ATTR } },
       layers: [{ id: "carto", type: "raster", source: "carto" }],
     },
     bounds: [[w, s], [e, n]], fitBoundsOptions: { padding: 20 },
@@ -277,7 +291,10 @@ function wirePopup(map, layer, level) {
     }
     html += `Rain accumulation — ${accLine} mm<br>`
       + `Warning lead ${p.t_lag_h} h`
-      + `<br>Area ${p.UP_AREA} km² · ARF ${p.arf}`
+      // ARF is computed on the basin's own area (SUB_AREA) — the area the radar
+      // accumulation is averaged over — not on the upstream drainage (UP_AREA).
+      + `<br>Basin ${p.SUB_AREA != null ? p.SUB_AREA : p.UP_AREA} km²`
+      + ` (upstream ${p.UP_AREA} km²) · ARF ${p.arf}`
       + (p.coverage != null && p.coverage < 1 ? `<br><i>coverage ${p.coverage} (partial window)</i>` : "");
     new maplibregl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
   });
