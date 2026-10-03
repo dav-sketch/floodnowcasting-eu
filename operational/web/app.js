@@ -11,6 +11,7 @@
 const REFRESH_MS = 120000;
 const RAINVIEWER_JSON = "https://api.rainviewer.com/public/weather-maps.json";  // live radar (client-side)
 const NONE_COLOR = "rgba(0,0,0,0)";
+const STALE_MIN = 60;     // warn when the baked rain/severity data is older than this (minutes)
 
 // ---- CARTO basemap ----------------------------------------------------
 // The CARTO raster basemaps now require an account key, appended to the tile
@@ -120,7 +121,7 @@ async function ensureVisibleLevels(map) {
 }
 
 async function refresh(map) {
-  let radarMeta = null, total = 0, when = "?";
+  let radarMeta = null, total = 0, when = "?", genUnix = null;
   for (const L of LV) {
     let data;
     try { data = await (await fetch("data/" + L.alerts, { cache: "no-store" })).json(); }
@@ -130,9 +131,12 @@ async function refresh(map) {
     if (SEV.has(L.level))                        // count only genuine severity alerts, not wet basins
       total += Object.values(alertsCache[L.level]).filter(a => a.label && a.label !== "none" && a.label !== "rain").length;
     if (!radarMeta && data.meta) radarMeta = data.meta;
-    if (data.meta && data.meta.generated_unix)
-      when = new Date(data.meta.generated_unix * 1000).toUTCString().replace("GMT", "UTC");
+    if (data.meta && data.meta.generated_unix) {
+      genUnix = data.meta.generated_unix;
+      when = new Date(genUnix * 1000).toUTCString().replace("GMT", "UTC");
+    }
   }
+  setStale(genUnix);
   try {
     const pins = await (await fetch("data/" + manifest.pins.file, { cache: "no-store" })).json();
     map.getSource("pins").setData(pins);
@@ -318,3 +322,17 @@ function sevLabel(l) {
   return { ">=100y": "≥100-y", "~30y": "~30-y", "~10y": "~10-y", watch: "watch", rain: "rain", none: "none" }[l] || l;
 }
 function setStatus(s) { document.getElementById("status").textContent = s; }
+
+// The basin colours come from the last pipeline run, while the radar layer is
+// live, so they can disagree. Say so when the run is old.
+function setStale(genUnix) {
+  const el = document.getElementById("stale");
+  if (!el) return;
+  const ageMin = genUnix ? (Date.now() / 1000 - genUnix) / 60 : Infinity;
+  if (ageMin <= STALE_MIN) { el.hidden = true; return; }
+  const age = !isFinite(ageMin) ? "unknown age"
+    : ageMin < 120 ? `${Math.round(ageMin)} min old` : `${(ageMin / 60).toFixed(1)} h old`;
+  el.textContent = `⚠ Basin rainfall/severity data is ${age} — recent rain is not included `
+    + `(the live radar layer is current).`;
+  el.hidden = false;
+}

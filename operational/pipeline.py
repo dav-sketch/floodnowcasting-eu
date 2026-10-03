@@ -7,8 +7,9 @@ Flow per cycle:
   ARF-reduced 10-y comparison (De Michele 2001) -> severity = return period
   (Ceresetti et al. 2012) -> colours + outputs.
 
-Radar sees convective cells (unlike a smoothing model); CAL_FACTOR fixes the tile
-over-read. The store grows across runs, so 6-10 h windows build up over time even
+Radar sees convective cells (unlike a smoothing model); tile colours are decoded
+by exact lookup in RainViewer's colour table (CAL_FACTOR = optional gauge bias
+correction). The store grows across runs, so 6-10 h windows build up over time even
 though RainViewer exposes only ~2 h of past frames per call. Run via run.py.
 """
 import io, math, json
@@ -166,15 +167,39 @@ def domain_grid():
     lat = np.degrees(np.arctan(np.sinh(np.pi*(1-2*(ty0+(ii+0.5)/256)/n))))
     return xr, yr, lon, lat
 
-_pal_rgb = np.array([c for _, c in C.PALETTE], float)
-_pal_dbz = np.array([d for d, _ in C.PALETTE], float)
+# Exact colour -> dBZ lookup in RainViewer's official Universal Blue table.
+# Each RGBA is packed into one uint32 key; unsmoothed tiles use only these colours.
+def _pack(rgba):
+    rgba = np.asarray(rgba, np.uint32)
+    return (rgba[..., 0] << 24) | (rgba[..., 1] << 16) | (rgba[..., 2] << 8) | rgba[..., 3]
+
+_lut = {}
+for _k, _h in enumerate(C.RV_UNIVERSAL_BLUE):
+    _rgba = tuple(int(_h[i:i+2], 16) for i in (0, 2, 4, 6))
+    _lut.setdefault(_rgba, C.RV_UNIVERSAL_BLUE_DBZ0 + _k)   # first dBZ wins (65+ all white)
+_lut_key = _pack(np.array(list(_lut.keys())))
+_order = np.argsort(_lut_key)
+_lut_key = _lut_key[_order]
+_lut_rgba = np.array(list(_lut.keys()), float)[_order]
+_lut_dbz = np.array(list(_lut.values()), float)[_order]
+
 def _decode(img):
-    rgb, a = img[..., :3].astype(float), img[..., 3]
-    d2 = ((rgb[..., None, :] - _pal_rgb[None, None, :])**2).sum(-1)
-    dbz = np.clip(_pal_dbz[np.argmin(d2, -1)], 0.0, C.DBZ_MAX)
-    rate = (10.0**(dbz/10.0)/C.ZR_A)**(1.0/C.ZR_B)     # mm/h (uncalibrated)
-    rate[a < C.RAIN_ALPHA_MIN] = 0.0
-    return rate
+    """RGBA tile mosaic -> rain rate (mm/h, uncalibrated)."""
+    flat = img.reshape(-1, 4)
+    dbz = np.full(len(flat), -np.inf)
+    echo = flat[:, 3] > 0                                   # transparent = no echo
+    px = flat[echo]
+    key = _pack(px)
+    pos = np.clip(np.searchsorted(_lut_key, key), 0, len(_lut_key) - 1)
+    hit = _lut_key[pos] == key
+    d = _lut_dbz[pos]
+    if not hit.all():                                       # stray colour -> nearest RGBA entry
+        miss = px[~hit].astype(float)
+        d[~hit] = _lut_dbz[np.argmin(((miss[:, None, :] - _lut_rgba[None]) ** 2).sum(-1), 1)]
+    dbz[echo] = d
+    rate = (10.0**(np.minimum(dbz, C.DBZ_MAX)/10.0)/C.ZR_A)**(1.0/C.ZR_B)   # mm/h
+    rate[dbz < C.DBZ_MIN] = 0.0
+    return rate.reshape(img.shape[:2])
 
 _BLANK = np.zeros((256, 256, 4), np.uint8)
 def _get_tile(url, tries=3):

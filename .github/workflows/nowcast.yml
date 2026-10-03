@@ -9,14 +9,17 @@ name: nowcast
 on:
   schedule:
     # ---- CADENCE: edit this one line freely ----
-    #   hourly        = "17 * * * *"   (current)
+    #   hourly        = "17 * * * *"  (current; off minute 0, GitHub's busiest slot)
     #   every 30 min  = "*/30 * * * *"
     #   every 15 min  = "*/15 * * * *"
     # IMPORTANT: keep the interval < 2 h. RainViewer serves only ~2 h of past
     # frames, so consecutive runs must overlap for gap-free accumulation. The
     # store dedupes frames by timestamp and sums over WINDOW_H, so totals stay
-    # correct for ANY cadence below 2 h. (GitHub may delay cron under load.)
-    - cron: "0 * * * *"
+    # correct for ANY cadence below 2 h.
+    # GitHub's schedule is best-effort (often 4-7 h gaps in practice), so the
+    # primary trigger is an external hourly cron (cron-job.org) calling the
+    # workflow_dispatch API; this schedule is only the backup.
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -26,7 +29,7 @@ permissions:
 
 concurrency:
   group: nowcast-pages
-  cancel-in-progress: true
+  cancel-in-progress: false     # queue overlapping runs (external + backup trigger), never abort one mid-cycle
 
 jobs:
   build-deploy:

@@ -8,11 +8,13 @@ of Ceresetti et al. (2012, *Weather and Forecasting*).
 ## Method (one cycle)
 
 1. **Quantitative rain** — [RainViewer](https://rainviewer.com) radar tiles decoded
-   to mm/h (palette→dBZ→Marshall-Palmer) × a **calibration factor** `CAL_FACTOR`.
+   to mm/h: each pixel colour is looked up **exactly** in RainViewer's official
+   "Universal Blue" colour table → dBZ → Marshall-Palmer, × an optional gauge
+   **calibration factor** `CAL_FACTOR` (default 1.0).
    Radar is used (not a model) because it *sees convective cells*; the model-based
    Open-Meteo smooths/misses them (~10× low), which is the fatal failure mode for
-   flash floods. `CAL_FACTOR≈0.20` fixes the tile over-read (tuned on Bucharest
-   convective cells and Swiss stratiform — both gave ~0.2). Frames are stored in a
+   flash floods. (An earlier approximate palette mis-read drizzle as heavy rain and
+   was offset by `CAL_FACTOR≈0.20`, which cut real rain ~5×; both are gone.) Frames are stored in a
    **rolling per-catchment table**, so 6–10 h windows build up over successive runs
    (RainViewer exposes only ~2 h per call). Tiles (~156/frame) are downloaded
    **concurrently** (`TILE_WORKERS`) — this was the dominant per-cycle cost.
@@ -60,7 +62,7 @@ a GitHub Actions cron. State is only a cache; each cycle is self-contained.
 | `WINDOW_H` | max rolling window retained (h); default 12 (≥ longest `ACC_WINDOWS_H`) |
 | `ACC_WINDOWS_H` / `ACC_DEFAULT_H` / `ACC_RAMP` | fixed rainfall-accumulation windows offered in the "View" selector (`[2,4,8,12]` h), the default window, and the blue colour ramp |
 | `UPDATE_MIN` | loop cadence (15–120) |
-| `CAL_FACTOR` | radar calibration multiplier (~0.20); tune against local gauges |
+| `CAL_FACTOR` | radar calibration multiplier (default 1.0 = raw Marshall-Palmer); tune against local gauges |
 | `TILE_Z` | radar tile zoom (keep fixed once the store exists) |
 | `ARF_SET` / `ARF_SETS` | which published ARF parameter set `(ϖ, a, b, v)` to use; default `"cevennes_flat"` (Ceresetti et al. 2012 Table 1). Also `"uk_nerc"`, `"milan_urban"`, `"cevennes_mountain"` |
 | `ARF_AREA_FIELD` | HydroBASINS area column fed to the ARF; **`SUB_AREA`** (the area the rain is averaged over) |

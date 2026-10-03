@@ -58,10 +58,13 @@ ACC_RAMP = [                              # (accumulated mm >=, colour), sequent
 ]
 
 # --- Quantitative rainfall: RainViewer radar (sees convective cells) ---
-# Colour PNG tiles -> dbZ -> mm/h (Marshall-Palmer), then a CALIBRATION factor.
-# CAL_FACTOR was tuned so decoded cell depths match observations/gauges:
-# Bucharest convective cells -> 0.22, Swiss stratiform vs Open-Meteo -> 0.21.
-# A single ~0.20 multiplier fixes the systematic tile over-read in both regimes.
+# Colour PNG tiles -> dBZ by EXACT lookup in RainViewer's official colour table
+# (scheme 2 "Universal Blue", tiles fetched unsmoothed) -> mm/h (Marshall-Palmer)
+# -> optional CALIBRATION factor.
+# History: an older hand-made PALETTE (nearest-RGB, not the real scheme) read
+# beige drizzle (<15 dBZ) as 40 dBZ and shifted convective colours +5 dBZ; a
+# CAL_FACTOR of 0.20 had been tuned to compensate, which in turn cut real
+# 0.5-5 mm/h rain by 5x. With the exact table no such correction is needed.
 # --- Depth-Duration-Frequency (DDF) 10-year thresholds ----------------
 # User-provided log-log DDF fit on the EURO-CORDEX grid (IDF/ folder). Per grid
 # point: a (slope) & b (intercept), with 10-y depth(mm) = 10**(a*log10(D_h)+b).
@@ -73,20 +76,29 @@ DDF_FILE = BASE / "IDF" / "IDF_loglogParameters.txt"
 DDF_D_MIN_H, DDF_D_MAX_H = 1.0, 24.0     # clamp response time to the DDF fit domain
 
 RV_JSON = "https://api.rainviewer.com/public/weather-maps.json"
-CAL_FACTOR = 0.20                         # <-- radar calibration (tune vs local gauges)
+CAL_FACTOR = 1.0                          # <-- radar calibration (tune vs local gauges)
 TILE_WORKERS = 16                         # concurrent radar-tile downloads per frame
                                           # (the domain is ~156 tiles/frame; sequential
                                           # fetch was the main runtime cost). 0/1 = serial.
-RAIN_ALPHA_MIN = 120
 ZR_A, ZR_B = 200.0, 1.6                   # Marshall-Palmer Z = A*R^B
+DBZ_MIN = 10.0                            # below this = no rain (0.15 mm/h; drops clutter/haze)
 DBZ_MAX = 53.0                            # clip hail tail
-PALETTE = [
-    (5 , (150,230,240)), (10,(108,209,235)), (15,( 54,186,229)),
-    (20,(  0,163,224)), (25,(  0,136,191)), (30,(  0,119,170)),
-    (35,( 60,190, 90)), (40,(240,240, 60)), (45,(250,180, 40)),
-    (50,(235, 90, 40)), (55,(190, 30, 30)), (60,(220, 60,180)),
-    (65,(240,150,230)),
-]
+# RainViewer "Universal Blue" rain colours, one per dBZ step, from
+# https://www.rainviewer.com/files/rainviewer_api_colors_table.csv
+# (65 dBZ and above are all white). Transparent = no echo.
+RV_UNIVERSAL_BLUE_DBZ0 = -10
+RV_UNIVERSAL_BLUE = (                    # dBZ -10, -9, ... 65 (RGBA hex)
+    "63615914", "66635a19", "69665c1e", "6c685d24", "6f6b5f29", "726e612e", "75706234", "78736439",
+    "7c75653e", "7f786744", "827b6949", "857d6a4e", "88806c54", "8b826d59", "8e856f5e", "92887164",
+    "9e93756e", "aa9e7978", "b6a97e82", "c2b4828c", "cec08796", "d2c48ba0", "d6c88faa", "dacc93b4",
+    "ded097be", "88ddeeff", "6cd1ebff", "51c5e8ff", "36bae5ff", "1baee2ff", "00a3e0ff", "009ad5ff",
+    "0091caff", "0088bfff", "007fb4ff", "0077aaff", "0070a3ff", "00699cff", "006295ff", "005b8eff",
+    "005588ff", "005180ff", "004e78ff", "004a70ff", "004768ff", "ffee00ff", "ffe000ff", "ffd200ff",
+    "ffc500ff", "ffb700ff", "ffaa00ff", "ff9f00ff", "ff9500ff", "ff8b00ff", "ff8100ff", "ff4400ff",
+    "f23600ff", "e62800ff", "d91b00ff", "cd0d00ff", "c10000ff", "a80000ff", "8f0000ff", "760000ff",
+    "5d0000ff", "ffaaffff", "ff9fffff", "ff95ffff", "ff8bffff", "ff81ffff", "ff77ffff", "ff6cffff",
+    "ff62ffff", "ff58ffff", "ff4effff", "ffffffff",
+)
 
 # Open-Meteo (model mm) - kept only as an optional stratiform cross-check /
 # for the future forecast-lead-time extension. NOT the primary trigger
