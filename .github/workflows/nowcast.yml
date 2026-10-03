@@ -53,8 +53,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: operational/state/frames_L*.csv
-          key: nowcast-store-${{ github.run_id }}
-          restore-keys: nowcast-store-
+          key: nowcast-store-v2-${{ github.run_id }}
+          restore-keys: nowcast-store-v2-
 
       - name: Run one cycle
         working-directory: operational
