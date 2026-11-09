@@ -18,14 +18,16 @@ on:
     # Inside OPERA coverage any cadence works (24-h server-side history).
     # Outside it (Greece, Ukraine, Turkey...) RainViewer serves only ~2 h, so keep
     # the interval < 2 h there; missing hours are shown as coverage < 1.
-    # GitHub's schedule is best-effort (often 4-7 h gaps in practice), so the
-    # primary trigger is an external hourly cron (cron-job.org) calling the
-    # workflow_dispatch API; this schedule is only the backup.
+    # GitHub's schedule is best-effort (measured Nov-2026: fires every 4-8 h, not
+    # hourly). The PRIMARY trigger is therefore the "chain" job below: each run
+    # dispatches the next one at the next hh:14 UTC (OPERA's hh:00 hour is on the
+    # server by then). This cron only restarts the chain if it ever breaks.
     - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: write                # lets the run dispatch the next one (self-chaining, see "chain")
   pages: write
   id-token: write
 
@@ -84,3 +86,35 @@ jobs:
           path: operational/web
       - id: deploy
         uses: actions/deploy-pages@v4
+
+  # Self-chaining hourly trigger. workflow_dispatch is one of the two events the
+  # built-in GITHUB_TOKEN is allowed to trigger, so no PAT or external cron is
+  # needed. Runs even if build-deploy failed, so one bad cycle can't stop the chain.
+  chain:
+    needs: build-deploy
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHAIN_MINUTE: "14"        # start each cycle at hh:14 UTC
+    steps:
+      - name: Wait for the next slot, then dispatch the next run
+        run: |
+          now=$(date -u +%s)
+          next=$(( now / 3600 * 3600 + CHAIN_MINUTE * 60 ))
+          while [ "$next" -le $(( now + 120 )) ]; do next=$(( next + 3600 )); done
+          echo "next run at $(date -u -d @$next +%H:%M) UTC (sleeping $(( (next - now) / 60 )) min)"
+          sleep $(( next - now ))
+          # Guard against duplicate chains: if another run of this workflow is
+          # already queued/running (e.g. the backup cron), let that one carry on.
+          others=$(gh run list -R "$GITHUB_REPOSITORY" --workflow nowcast.yml -L 20                      --json databaseId,status                      --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID and
+                            (.status == \"queued\" or .status == \"in_progress\" or
+                             .status == \"pending\" or .status == \"waiting\" or
+                             .status == \"requested\"))] | length")
+          if [ "$others" -gt 0 ]; then
+            echo "another run is already queued/running ($others) - not dispatching"
+          else
+            gh workflow run nowcast.yml -R "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+            echo "dispatched next cycle"
+          fi

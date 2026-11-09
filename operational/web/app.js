@@ -11,7 +11,10 @@
 const REFRESH_MS = 120000;
 const RAINVIEWER_JSON = "https://api.rainviewer.com/public/weather-maps.json";  // live radar (client-side)
 const NONE_COLOR = "rgba(0,0,0,0)";
-const STALE_MIN = 60;     // warn when the baked rain/severity data is older than this (minutes)
+// Warn when the baked rain/severity data is older than this (minutes). Hourly
+// cycle at hh:14 + ~10 min OPERA latency + ~6 min run/deploy -> data is normally
+// 20-80 min old; past 95 min an update has really been missed.
+const STALE_MIN = 95;
 
 // ---- CARTO basemap ----------------------------------------------------
 // The CARTO raster basemaps now require an account key, appended to the tile
