@@ -42,6 +42,7 @@ RADAR_MAXZOOM = 7                         # radar raster native maxzoom; MapLibr
 PIN_LABELS = ["watch", "~10y", "~30y", ">=100y"]   # which severities get a pin
 PIN_RADIUS = {8: 7, 9: 4}                          # circle radius (px) by level: L8 larger, L9 small
 WINDOW_H    = 12.0                        # max rolling window retained (h); must be >= max(ACC_WINDOWS_H)
+                                          # and a whole number (accumulation is in 1-h slots)
 UPDATE_MIN  = 30                          # loop cadence; clamped to [15, 120] by run.py
 FRAME_INTERVAL_MIN = 10                   # RainViewer past-frame spacing
 
@@ -75,11 +76,48 @@ ACC_RAMP = [                              # (accumulated mm >=, colour), sequent
 DDF_FILE = BASE / "IDF" / "IDF_loglogParameters.txt"
 DDF_D_MIN_H, DDF_D_MAX_H = 1.0, 24.0     # clamp response time to the DDF fit domain
 
+# --- QPE sources & merging (Nov-2026) ---------------------------------
+# PRIMARY = EUMETNET OPERA "NIMBUS" 1-h accumulation composite (ACRR): a QC'd
+# pan-European radar composite (2 km LAEA, CC BY 4.0), published every 15 min
+# with ~10-15 min latency on a PUBLIC S3 bucket that keeps the last 24 h.
+# Because any past hour can be re-downloaded, a run that comes late (GitHub cron
+# jitter, a missed run, a lost Actions cache) loses NOTHING up to 24 h back.
+# SECONDARY = RainViewer 10-min frames, used only to fill basins OPERA does not
+# see (no radar: Greece, Ukraine, Turkey, Belarus/Russia, open sea ...) or hours
+# where an OPERA file is missing. Merge is per basin and per hour slot:
+#     slot k = (T-(k+1)h, T-k h],   T = anchor (latest OPERA end time)
+#     value  = OPERA ACRR(T-k h)  if the basin is >= MIN_VALID_FRAC observed,
+#            else 6 * mean(RainViewer frames in the slot) if >= RV_MIN_FRAMES_PER_H,
+#            else MISSING (never silently 0 -> reported as coverage < 1).
+USE_OPERA = True
+OPERA_S3 = "https://s3.waw3-1.cloudferro.com/openradar-24h"
+OPERA_PRODUCT = "ACRR"                    # 1-h accumulation; key time = END of the hour
+OPERA_QI_MIN = 0.3                        # drop pixels with total quality index below this
+                                          # (the >40 mm/h clutter spikes carry QI ~0-0.15)
+OPERA_WORKERS = 4                         # parallel file downloads (~1.8 MB each)
+OPERA_MAX_LAG_MIN = 45                    # if OPERA's newest file is older than RainViewer's
+                                          # newest frame by more than this, anchor on
+                                          # RainViewer instead (OPERA outage)
+MIN_VALID_FRAC = 0.5                      # a basin value needs >= this fraction of its pixels observed
+RV_MODE = "gapfill"                       # "gapfill": fetch only tiles touching basins outside the
+                                          #   OPERA footprint (fewer requests); "full": whole domain
+RV_MIN_FRAMES_PER_H = 3                   # RainViewer hour = 6 x mean of >= this many 10-min frames
+# Harmonise the RainViewer fill to OPERA: where both see the same basin-hour
+# (border tiles), estimate k = sum(OPERA)/sum(RainViewer) and multiply the fill
+# by k, smoothed across runs in log space (state/rv_bias.json). First live
+# test (2026-11-09, 848 wet L8 basins, Iberian front) gave RV/OPERA = 1.74.
+RV_BIAS_ADJUST = True
+RV_BIAS_MIN_BASINS = 30                   # overlap basins needed for an update...
+RV_BIAS_MIN_MM = 20.0                     # ...and this much OPERA rain over them (sum)
+RV_BIAS_ALPHA = 0.3                       # weight of the new estimate in the log-space EMA
+RV_BIAS_BOUNDS = (0.3, 3.0)               # clip k to this range
+
 RV_JSON = "https://api.rainviewer.com/public/weather-maps.json"
-CAL_FACTOR = 1.0                          # <-- radar calibration (tune vs local gauges)
-TILE_WORKERS = 16                         # concurrent radar-tile downloads per frame
-                                          # (the domain is ~156 tiles/frame; sequential
-                                          # fetch was the main runtime cost). 0/1 = serial.
+CAL_FACTOR = 1.0                          # <-- RainViewer calibration (tune vs local gauges / OPERA)
+TILE_WORKERS = 8                          # concurrent radar-tile downloads per frame
+RV_MAX_TILES_PER_MIN = 400                # RainViewer limits tiles to 500/min per IP (HTTP 429,
+                                          # header x-ratelimit-limit). The old code turned a 429
+                                          # into a DRY tile and stored it for good -> rain erased.
 ZR_A, ZR_B = 200.0, 1.6                   # Marshall-Palmer Z = A*R^B
 DBZ_MIN = 10.0                            # below this = no rain (0.15 mm/h; drops clutter/haze)
 DBZ_MAX = 53.0                            # clip hail tail

@@ -26,7 +26,11 @@ const CARTO_TILES = ["a", "b", "c", "d"].map(
   s => `https://${s}.basemaps.cartocdn.com/${CARTO_STYLE}/{z}/{x}/{y}.png?key=${CARTO_KEY}`);
 const CARTO_ATTR  =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, '
-  + '&copy; <a href="https://carto.com/attributions">CARTO</a>';
+  + '&copy; <a href="https://carto.com/attributions">CARTO</a> · '
+  // Rain overlay: OPERA composites are CC BY 4.0 -> attribution is mandatory.
+  + 'Rain: <a href="https://www.eumetnet.eu/observations/weather-radar-network/">EUMETNET OPERA</a> '
+  + '(<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>), '
+  + '<a href="https://www.rainviewer.com/">RainViewer</a>';
 
 const geos = {};          // level -> base GeoJSON once loaded
 const loaded = {};        // level -> bool
@@ -190,7 +194,11 @@ function applyAlerts(map, level) {
   geo.features.forEach(f => {
     const a = alerts[f.properties.HYBAS_ID];
     const acc = a && a.acc ? a.acc : {};
-    ACC.windows.forEach(w => { f.properties["acc_" + w] = acc[String(w)] ?? 0; });
+    const cov = a && a.cov ? a.cov : {};                 // per-window data coverage (absent = complete)
+    ACC.windows.forEach(w => {
+      f.properties["acc_" + w] = acc[String(w)] ?? 0;
+      f.properties["cov_" + w] = cov[String(w)] ?? 1;
+    });
     f.properties.label = a && a.label ? a.label : "none";
     f.properties.sevcolor = a && a.color ? a.color : NONE_COLOR;
     f.properties.T = a && a.T != null ? a.T : 0;
@@ -280,7 +288,9 @@ function wireRadarToggle(map) {
 function wirePopup(map, layer, level) {
   map.on("click", layer, e => {
     const p = e.features[0].properties;
-    const accLine = ACC.windows.map(w => `${w}h: <b>${(+p["acc_" + w] || 0).toFixed(1)}</b>`).join(" · ");
+    const accLine = ACC.windows.map(w => `${w}h: <b>${(+p["acc_" + w] || 0).toFixed(1)}</b>`
+      + ((+p["cov_" + w] ?? 1) < 1 ? `<sup title="radar data for ${Math.round(100 * p["cov_" + w])}% of the window">*</sup>` : "")).join(" · ");
+    const partial = ACC.windows.some(w => (+p["cov_" + w] ?? 1) < 1);
     let html = `<b>Basin ${p.HYBAS_ID}</b><br>`;
     if (SEV.has(level)) {   // severity level: response-time comparison (obs vs 10-y DDF level)
       const D = p.D_ddf_h != null ? p.D_ddf_h : Math.round(p.D_test_h);   // rounded response-time window (h)
@@ -299,7 +309,8 @@ function wirePopup(map, layer, level) {
       // accumulation is averaged over — not on the upstream drainage (UP_AREA).
       + `<br>Basin ${p.SUB_AREA != null ? p.SUB_AREA : p.UP_AREA} km²`
       + ` (upstream ${p.UP_AREA} km²) · ARF ${p.arf}`
-      + (p.coverage != null && p.coverage < 1 ? `<br><i>coverage ${p.coverage} (partial window)</i>` : "");
+      + (p.coverage != null && p.coverage < 1 ? `<br><i>coverage ${p.coverage} (partial window)</i>` : "")
+      + (partial ? `<br><i>* some hours have no radar data (counted as unknown, not dry)</i>` : "");
     new maplibregl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
   });
   map.on("mouseenter", layer, () => map.getCanvas().style.cursor = "pointer");

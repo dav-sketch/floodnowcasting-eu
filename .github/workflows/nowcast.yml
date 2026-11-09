@@ -1,10 +1,13 @@
 name: nowcast
 
-# Every 15 min: run one pipeline cycle and deploy the static site to GitHub Pages.
+# Run one pipeline cycle and deploy the static site to GitHub Pages.
 # Precompute artifacts (operational/state/attrs_L*.csv, pixel_cat_L*.npz and
 # operational/web/data/catchments_L*.geojson + levels.json) must be committed once
-# (run `python run.py --precompute` locally). The rolling store (frames_L*.csv) is
-# persisted between runs via the Actions cache, so the 6-10 h window builds up.
+# (run `python run.py --precompute` locally).
+# Rain: OPERA 1-h accumulations are re-downloaded from EUMETNET's 24-h cache, so a
+# late / skipped run loses nothing within OPERA coverage. The stores
+# (opera_L*.csv, rv_L*.csv, rv_bias.json) are only a cache, kept between runs via
+# the Actions cache; RainViewer gap-fill outside OPERA still needs runs < 2 h apart.
 
 on:
   schedule:
@@ -12,10 +15,9 @@ on:
     #   hourly        = "17 * * * *"  (current; off minute 0, GitHub's busiest slot)
     #   every 30 min  = "*/30 * * * *"
     #   every 15 min  = "*/15 * * * *"
-    # IMPORTANT: keep the interval < 2 h. RainViewer serves only ~2 h of past
-    # frames, so consecutive runs must overlap for gap-free accumulation. The
-    # store dedupes frames by timestamp and sums over WINDOW_H, so totals stay
-    # correct for ANY cadence below 2 h.
+    # Inside OPERA coverage any cadence works (24-h server-side history).
+    # Outside it (Greece, Ukraine, Turkey...) RainViewer serves only ~2 h, so keep
+    # the interval < 2 h there; missing hours are shown as coverage < 1.
     # GitHub's schedule is best-effort (often 4-7 h gaps in practice), so the
     # primary trigger is an external hourly cron (cron-job.org) calling the
     # workflow_dispatch API; this schedule is only the backup.
@@ -49,12 +51,18 @@ jobs:
         working-directory: operational
         run: pip install -r requirements.txt
 
+      # Key prefix MUST be identical in restore-keys and save key (the old
+      # workflow restored "nowcast-store-v2-" but saved "nowcast-store-<id>",
+      # so the store was never restored and every run started from scratch).
       - name: Restore rolling store
         uses: actions/cache/restore@v4
         with:
-          path: operational/state/frames_L*.csv
-          key: nowcast-store-v2-${{ github.run_id }}
-          restore-keys: nowcast-store-v2-
+          path: |
+            operational/state/opera_L*.csv
+            operational/state/rv_L*.csv
+            operational/state/rv_bias.json
+          key: nowcast-store-v3-${{ github.run_id }}
+          restore-keys: nowcast-store-v3-
 
       - name: Run one cycle
         working-directory: operational
@@ -64,8 +72,11 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: operational/state/frames_L*.csv
-          key: nowcast-store-${{ github.run_id }}
+          path: |
+            operational/state/opera_L*.csv
+            operational/state/rv_L*.csv
+            operational/state/rv_bias.json
+          key: nowcast-store-v3-${{ github.run_id }}
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

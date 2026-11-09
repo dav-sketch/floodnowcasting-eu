@@ -7,17 +7,14 @@ of Ceresetti et al. (2012, *Weather and Forecasting*).
 
 ## Method (one cycle)
 
-1. **Quantitative rain** — [RainViewer](https://rainviewer.com) radar tiles decoded
-   to mm/h: each pixel colour is looked up **exactly** in RainViewer's official
-   "Universal Blue" colour table → dBZ → Marshall-Palmer, × an optional gauge
-   **calibration factor** `CAL_FACTOR` (default 1.0).
-   Radar is used (not a model) because it *sees convective cells*; the model-based
-   Open-Meteo smooths/misses them (~10× low), which is the fatal failure mode for
-   flash floods. (An earlier approximate palette mis-read drizzle as heavy rain and
-   was offset by `CAL_FACTOR≈0.20`, which cut real rain ~5×; both are gone.) Frames are stored in a
-   **rolling per-catchment table**, so 6–10 h windows build up over successive runs
-   (RainViewer exposes only ~2 h per call). Tiles (~156/frame) are downloaded
-   **concurrently** (`TILE_WORKERS`) — this was the dominant per-cycle cost.
+1. **Quantitative rain (Nov-2026: OPERA primary, RainViewer gap-fill)** — see
+   "Rainfall data & merging" below. Hourly per-basin rain over the last
+   `WINDOW_H` hours, merged per basin and per hour from:
+   - **EUMETNET OPERA NIMBUS 1-h accumulation** (`ACRR`, 2 km, QC'd pan-European
+     composite, CC BY 4.0) from the public S3 cache that keeps **24 h** → any
+     late/missed run is backfilled exactly;
+   - **RainViewer** 10-min tiles (colour → dBZ by exact "Universal Blue" lookup →
+     Marshall-Palmer), only where OPERA has no radar, rescaled to OPERA's level.
 2. **Accumulate** each basin's areal-average rain over **its own response time**
    `t_lag ≈ 0.9·UP_AREA^0.38 h`, capped at `WINDOW_H` and **rounded to whole hours**
    (`D_ddf_h`); the same window is used for the observation and the threshold.
@@ -152,12 +149,66 @@ partly cancel (longer `D` → higher threshold *and* more accumulated rain), but
 clean fix is to route accumulation downstream through `NEXT_DOWN` so the
 observation really is the upstream-area mean. Left as future work.
 
+## Rainfall data & merging (Nov-2026)
+
+**Why it changed.** In a rainy week the app raised no alert. Two bugs together
+kept every run on a 2-hour window: (1) the Actions cache restored the key prefix
+`nowcast-store-v2-` but saved `nowcast-store-<id>`, so the store was never
+restored; (2) RainViewer now limits tiles to **500 per minute** (HTTP 429), and
+a cold start asks for about 2000. Each 429 was decoded as a *dry* tile and stored,
+and a stored frame was never fetched again. The live site showed
+`store_span_h = 2.0` and identical 2 h and 12 h totals.
+
+**Sources** (`qpe.py`, both resampled to the existing Web-Mercator domain grid,
+so the committed `pixel_cat_L*.npz` maps are reused; no shapefiles needed):
+
+| | OPERA NIMBUS `ACRR` (primary) | RainViewer (gap-fill) |
+|---|---|---|
+| what | 1-h accumulation, new file every 15 min | 10-min radar frames (PNG tiles) |
+| where | `https://s3.waw3-1.cloudferro.com/openradar-24h/YYYY/MM/DD/OPERA/COMP/OPERA@YYYYMMDDTHHMM@0@ACRR.h5` (no key; key time = END of hour) | `api.rainviewer.com/public/weather-maps.json` |
+| history | **24 h** | ~2 h |
+| grid | 1900×2200 × 2 km LAEA (`where/projdef`); nodata = outside coverage, undetect = dry; QI layer | Web-Mercator z6 |
+| coverage | most of EU incl. IT/AT/CH/ES/RO; **not** Greece, Ukraine, Turkey, Belarus/Russia | everywhere |
+| licence | CC BY 4.0 — attribution shown on the map | RainViewer terms |
+
+**Merge rule**, per basin and per hour slot `(T-(k+1)h, T-kh]`, where the anchor
+`T` = the newest OPERA end time (or the newest RainViewer frame time if OPERA lags
+it by more than `OPERA_MAX_LAG_MIN`):
+1. OPERA `ACRR(T-kh)` if ≥ `MIN_VALID_FRAC` of the basin's pixels are observed
+   (pixels with QI < `OPERA_QI_MIN` are dropped, which removes the 40–200 mm/h
+   clutter spikes);
+2. else RainViewer: `6 × mean` of the frames in the slot (≥ `RV_MIN_FRAMES_PER_H`),
+   × `k`, the RainViewer→OPERA factor. `k = Σ OPERA / Σ RainViewer` over the
+   basin-hours both sources observed, smoothed in log space across runs
+   (`state/rv_bias.json`). First live estimate: **k ≈ 0.56** (1745 wet L8 basins,
+   correlation 0.78), i.e. RainViewer reads ~1.75× OPERA;
+3. else **missing**: the hour adds 0 to the sum but lowers the basin's `coverage`
+   (written to `alerts_L*.json` as `cov` per window and shown in the popup with
+   a `*`). A failed download can no longer pass for "no rain".
+
+Because the slots are tied to the *data* time, totals do not depend on when or
+how often the job runs. `python test_accumulation.py` replays a synthetic
+timeline at 15-min, hourly, GitHub-jitter (gaps up to 9 h), single-run-after-20-h
+and repeated same-minute cadences: OPERA basins are exact (error < 1e-14 mm) in
+every case, RainViewer hours seen in full are exact, and partially seen hours are
+rescaled estimates.
+
+**Operational limits.**
+- OPERA covers any cadence up to a 24 h gap. Outside OPERA, RainViewer still
+  needs runs less than 2 h apart; GitHub's best-effort cron leaves holes there,
+  and those holes show up as coverage < 1.
+- RainViewer is paced at `RV_MAX_TILES_PER_MIN = 400`. Only tiles touching
+  OPERA-blind basins are fetched (`RV_MODE="gapfill"`, ~96 of 156). If any OPERA
+  hour is missing, the whole domain is fetched for that run.
+- OPERA NIMBUS is **not gauge-adjusted** (Marshall-Palmer, no bias correction).
+  `k` harmonises RainViewer to OPERA, not to gauges.
+- Runtime: about 4–5 min on a cold start (RainViewer pacing), about 40 s afterwards.
+
 ## Notes & next steps
 
-- **QPE choice.** Calibrated RainViewer sees convective cells with realistic
-  magnitude, but the calibration is a single empirical factor. For gauge-adjusted
-  radar millimetres (no calibration guesswork) swap in EUMETNET **OPERA** QPE
-  (needs registration). Open-Meteo (`OM_URL`) is kept only as a stratiform
+- **QPE choice.** OPERA is now the primary source (see above). A gauge
+  adjustment would be the next step (e.g. the Netatmo-adjusted OPERA work by
+  Overeem et al.). Open-Meteo (`OM_URL`) is kept only as a stratiform
   cross-check / for the forecast-lead-time extension — it must not be the trigger.
 - **Scale to all Europe.** Widen `DOMAIN_BBOX`; keep API calls bounded with a
   sensible `GRID_DEG`, or only query grid cells flagged wet by a coarse pre-scan.

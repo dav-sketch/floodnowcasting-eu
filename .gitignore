@@ -12,8 +12,11 @@ __pycache__/
 # Pipeline runtime that is regenerated / cached (git has no inline comments,
 # so these patterns must sit on their own lines)
 operational/out/
-# rolling store — persisted between CI runs via the Actions cache
+# rolling stores — persisted between CI runs via the Actions cache
 operational/state/frames_L*.csv
+operational/state/opera_L*.csv
+operational/state/rv_L*.csv
+operational/state/rv_bias.json
 # regenerated every cycle by the workflow (deployed via Pages artifact)
 operational/web/data/alerts_L*.json
 operational/web/data/pins.geojson

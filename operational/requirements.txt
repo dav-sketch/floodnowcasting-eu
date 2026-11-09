@@ -5,3 +5,5 @@ shapely
 requests
 pillow
 scipy
+h5py
+pyproj

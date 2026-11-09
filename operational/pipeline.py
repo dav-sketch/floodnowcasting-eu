@@ -1,18 +1,21 @@
-"""FloodNowcasting.eu 2.0 - operational pipeline (calibrated RainViewer radar).
+"""FloodNowcasting.eu 2.0 - operational pipeline (OPERA radar + RainViewer gap-fill).
 
 Flow per cycle:
-  RainViewer radar tiles -> decode to mm/h -> CALIBRATION factor -> per-catchment
-  areal-mean mm for each *new* frame -> rolling store (deduped by timestamp,
-  pruned to WINDOW_H) -> accumulate each basin over ITS OWN response time ->
-  ARF-reduced 10-y comparison (De Michele 2001) -> severity = return period
-  (Ceresetti et al. 2012) -> colours + outputs.
+  anchor T = newest OPERA 1-h accumulation end time
+  -> for each of the last WINDOW_H hour slots (T-(k+1)h, T-kh]:
+       OPERA ACRR(T-kh) per-basin areal mean   (downloaded once, cached in the store;
+                                                  re-downloadable for 24 h -> gap-proof)
+       else RainViewer 10-min frames in that slot (only basins OPERA does not see)
+       else MISSING (coverage < 1, never a silent 0)
+  -> fixed-window sums (2/4/8/12 h) and each basin's OWN response-time sum
+  -> ARF-reduced 10-y comparison (De Michele 2001) -> severity = return period
+     (Ceresetti et al. 2012) -> colours + outputs.
 
-Radar sees convective cells (unlike a smoothing model); tile colours are decoded
-by exact lookup in RainViewer's colour table (CAL_FACTOR = optional gauge bias
-correction). The store grows across runs, so 6-10 h windows build up over time even
-though RainViewer exposes only ~2 h of past frames per call. Run via run.py.
+Accumulation is in whole-hour slots anchored on the data time, not on the run
+time, so the result does not depend on when / how irregularly the runs happen.
+Run via run.py.
 """
-import io, math, json
+import io, math, json, time
 from pathlib import Path
 import numpy as np, pandas as pd, requests
 import geopandas as gpd
@@ -20,6 +23,7 @@ from shapely.geometry import box
 from PIL import Image
 
 import config as C
+import qpe as Q
 
 # ----------------------------------------------------------------------
 # Poschlod 10-year return levels (threshold)  - shared cache with notebook
@@ -201,40 +205,13 @@ def _decode(img):
     rate[dbz < C.DBZ_MIN] = 0.0
     return rate.reshape(img.shape[:2])
 
-_BLANK = np.zeros((256, 256, 4), np.uint8)
-def _get_tile(url, tries=3):
-    """Fetch one radar tile; transient errors -> blank (dry) tile, never crash."""
-    for k in range(tries):
-        try:
-            r = requests.get(url, timeout=30)
-            if r.status_code == 200:
-                return np.array(Image.open(io.BytesIO(r.content)).convert("RGBA"))
-            return _BLANK
-        except requests.RequestException:
-            if k == tries - 1:
-                return _BLANK
-    return _BLANK
-
-def fetch_frame_rate(host, path, xr, yr):
-    """Decode one radar frame over the domain grid. Tiles are downloaded
-    CONCURRENTLY (I/O-bound), then assembled in the exact same row/col order."""
-    xr, yr = list(xr), list(yr)
-    coords = [(tx, ty) for tx in xr for ty in yr]
-    urls = [f"{host}{path}/256/{C.TILE_Z}/{tx}/{ty}/2/0_0.png" for tx, ty in coords]
-    workers = max(1, int(getattr(C, "TILE_WORKERS", 1)))
-    if workers > 1:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            tiles = list(ex.map(_get_tile, urls))
-    else:
-        tiles = [_get_tile(u) for u in urls]
-    grid = dict(zip(coords, tiles))
-    cols = [np.concatenate([grid[(tx, ty)] for ty in yr], axis=0) for tx in xr]
-    return _decode(np.concatenate(cols, axis=1))
+def fetch_frame_rate(host, path, xr, yr, tiles=None):
+    """Decode one RainViewer frame over the domain grid (rate-limited download).
+    Returns (mm/h with NaN where a tile was not requested / not obtained, n_failed)."""
+    return Q.rv_fetch_frame(host, path, xr, yr, _decode, tiles)
 
 def rainviewer_frames():
-    j = requests.get(C.RV_JSON, timeout=30).json()
-    return j["host"], j["radar"]["past"]
+    return Q.rainviewer_frames()
 
 # ----------------------------------------------------------------------
 # precompute: catchments (+thresholds) and radar-pixel -> catchment map
@@ -242,7 +219,8 @@ def rainviewer_frames():
 def _level_paths(lv):
     return {"attrs": C.STATE / f"attrs_L{lv}.csv",       # small per-cycle table (no geometry)
             "pmap":  C.STATE / f"pixel_cat_L{lv}.npz",    # compressed grid->basin map
-            "store": C.STATE / f"frames_L{lv}.csv",
+            "opera": C.STATE / f"opera_L{lv}.csv",       # [ACRR end time x basin] hourly mm
+            "rv":    C.STATE / f"rv_L{lv}.csv",          # [frame time x basin] 10-min mm (NaN = unseen)
             "geo":   C.WEBDATA / f"catchments_L{lv}.geojson",
             "alerts": C.WEBDATA / f"alerts_L{lv}.json"}
 
@@ -331,182 +309,303 @@ def _export_web_geometry(g, lv, out):
         w.to_file(out, driver="GeoJSON")
     print(f"    web geometry -> {out.name} ({out.stat().st_size//1024} KB)")
 
+
 # ----------------------------------------------------------------------
-# rolling store (per level): table [frame_time x HYBAS_ID] of calibrated mm
+# rolling stores (per level, per source). Pure CACHES: OPERA hours can always be
+# re-downloaded for 24 h, so losing a store only costs download time.
+#   opera_L*.csv : index = ACRR end time (unix), value = basin mean mm over the hour
+#   rv_L*.csv    : index = RainViewer frame time, value = basin mean mm over 10 min
+#   NaN = basin not (sufficiently) observed by that source at that time.
 # ----------------------------------------------------------------------
-def load_store(lv):
-    p = _level_paths(lv)["store"]
+def load_store(lv, kind):
+    p = _level_paths(lv)[kind]
     if not p.exists(): return pd.DataFrame()
     df = pd.read_csv(p, index_col=0); df.index = df.index.astype("int64")
     df.columns = [str(c) for c in df.columns]; return df
-def save_store(lv, df): df.to_csv(_level_paths(lv)["store"])
+
+def save_store(lv, kind, df):
+    df.to_csv(_level_paths(lv)[kind], float_format="%.4g")
+
+def areal_mean(field_mm, pixel_cat, n_cat):
+    """Per-basin mean of a grid field (mm) over OBSERVED pixels only.
+    NaN where < MIN_VALID_FRAC of the basin's pixels are observed."""
+    v = field_mm.ravel()
+    inb = pixel_cat >= 0
+    obs = inb & ~np.isnan(v)
+    tot = np.bincount(pixel_cat[obs], weights=v[obs], minlength=n_cat)
+    nobs = np.bincount(pixel_cat[obs], minlength=n_cat)
+    nall = np.bincount(pixel_cat[inb], minlength=n_cat)
+    out = np.full(n_cat, np.nan)
+    ok = (nall > 0) & (nobs >= C.MIN_VALID_FRAC * np.maximum(nall, 1))
+    out[ok] = tot[ok] / nobs[ok]
+    return out
 
 def areal_mean_mm(rate, pixel_cat, n_cat):
-    """Per-catchment mean CALIBRATED mm for one frame."""
-    mm = rate.ravel() * (C.FRAME_INTERVAL_MIN/60.0) * C.CAL_FACTOR
-    valid = pixel_cat >= 0
-    idx = pixel_cat[valid]; w = mm[valid]
-    tot = np.bincount(idx, weights=w, minlength=n_cat)
-    cnt = np.bincount(idx, minlength=n_cat)
-    return np.divide(tot, cnt, out=np.zeros(n_cat), where=cnt > 0)
+    """RainViewer frame (mm/h) -> per-basin mean mm over one 10-min frame."""
+    return areal_mean(rate * (C.FRAME_INTERVAL_MIN / 60.0) * C.CAL_FACTOR, pixel_cat, n_cat)
 
-# ---- rolling-store algebra (the no-double-count guarantee lives here) ----
-# The store is keyed by each radar frame's UNIX timestamp. merge_frames dedupes
-# on that key, so a given 10-min frame is stored exactly once no matter how many
-# overlapping 2-h fetches (at any cadence) observe it. window_accumulate then
-# sums each stored frame once -> the 6-10 h total is cadence-independent and is
-# never inflated by re-seeing the same frame.
+# ---- store algebra: dedupe by timestamp -> a frame/hour counts exactly once ----
 def merge_frames(store, rows):
     if rows:
         parts = ([store] if len(store) else []) + [r.to_frame().T for r in rows]
         store = pd.concat(parts)
     if len(store):
-        store = store[~store.index.duplicated(keep="last")].sort_index()   # dedupe by timestamp
+        store = store[~store.index.duplicated(keep="last")].sort_index()
     return store
 
-def prune_store(store, window_h):
+def prune_store(store, oldest_t):
     if not len(store): return store
-    now_t = int(store.index.max())
-    return store[store.index >= now_t - window_h*3600]
+    return store[store.index > oldest_t - 3600]
 
-def window_accumulate(store, hids, d_test):
-    """Per-basin rainfall sum over each basin's trailing D_test window (mm),
-    plus (span_h, now_t). Each stored frame contributes exactly once.
-    Vectorised: d_test takes only a few integer-hour values, so we sum once per
-    distinct window instead of looping over every basin."""
-    times = store.index.to_numpy(dtype=float)
-    now_t = times.max(); age_h = (now_t - times) / 3600.0; span_h = (now_t - times.min()) / 3600.0
-    d_test = np.asarray(d_test, dtype=float)
-    arr = np.nan_to_num(store.reindex(columns=list(hids)).to_numpy(dtype=float))  # rows=frames, cols=basins
-    acc = np.zeros(len(hids))
-    for dt in np.unique(d_test):
-        cols = np.where(d_test == dt)[0]
-        acc[cols] = arr[np.ix_(age_h <= dt, cols)].sum(axis=0)
-    return acc, span_h, now_t
+def hourly_slots(op_store, rv_store, hids, T, n_h, rv_scale=1.0):
+    """Merged hourly rainfall [n_h x basins], slot k = (T-(k+1)h, T-kh].
+    Returns (mm with NaN = missing, src with 0=missing / 1=OPERA / 2=RainViewer).
+    RainViewer fill is multiplied by rv_scale (OPERA-harmonisation factor).
+    Anchored on the DATA time T, so it does not depend on when runs happen."""
+    n = len(hids)
+    arr = np.full((n_h, n), np.nan); src = np.zeros((n_h, n), np.int8)
+    if len(op_store):
+        op = op_store.reindex(columns=list(hids))
+    if len(rv_store):
+        rv = rv_store.reindex(columns=list(hids))
+        rv_t = rv.index.to_numpy(np.int64); rv_a = rv.to_numpy(float)
+    per_h = 60.0 / C.FRAME_INTERVAL_MIN
+    for k in range(n_h):
+        te = int(T) - k * 3600
+        if len(op_store) and te in op.index:
+            v = op.loc[te].to_numpy(float); ok = ~np.isnan(v)
+            arr[k, ok] = v[ok]; src[k, ok] = 1
+        if len(rv_store):
+            sel = (rv_t > te - 3600) & (rv_t <= te)
+            if sel.any():
+                sub = rv_a[sel]; nok = (~np.isnan(sub)).sum(axis=0)
+                fill = np.isnan(arr[k]) & (nok >= C.RV_MIN_FRAMES_PER_H)
+                if fill.any():
+                    arr[k, fill] = np.nansum(sub[:, fill], axis=0) / nok[fill] * per_h * rv_scale
+                    src[k, fill] = 2
+    return arr, src
 
-def fixed_window_accum(store, hids, windows_h):
-    """Per-basin rainfall sum over each FIXED trailing window (mm).
-    Returns {window_h: np.array over hids}. Each stored frame contributes once."""
-    times = store.index.to_numpy(dtype=float)
-    now_t = times.max(); age_h = (now_t - times) / 3600.0
-    arr = store.reindex(columns=hids).to_numpy(dtype=float)   # rows=frames, cols=basins (hids order)
-    return {w: np.nan_to_num(arr[age_h <= w, :]).sum(axis=0) for w in windows_h}
+def rv_bias_sample(op_store, rv_store, T, n_h):
+    """(sum OPERA, sum RainViewer, n basins) over basin-hours seen by BOTH sources
+    (RainViewer with all 6 frames) and wet in either. Raw RainViewer, no scaling."""
+    if not (len(op_store) and len(rv_store)): return 0.0, 0.0, 0
+    cols = op_store.columns.intersection(rv_store.columns)
+    rv_t = rv_store.index.to_numpy(np.int64); rv_a = rv_store[cols].to_numpy(float)
+    so = sr = 0.0; nb = 0
+    for k in range(n_h):
+        te = int(T) - k * 3600
+        if te not in op_store.index: continue
+        sel = (rv_t > te - 3600) & (rv_t <= te)
+        if sel.sum() < 6: continue
+        o = op_store.loc[te, cols].to_numpy(float)
+        sub = rv_a[sel]; r = sub.sum(axis=0)              # NaN if any frame unseen
+        both = ~np.isnan(o) & ~np.isnan(r) & ((o > 0.2) | (r > 0.2))
+        so += o[both].sum(); sr += r[both].sum(); nb += int(both.sum())
+    return so, sr, nb
+
+def rv_bias_update(sample):
+    """Log-space EMA of k = OPERA / RainViewer, persisted in state/rv_bias.json."""
+    f = C.STATE / "rv_bias.json"
+    st = json.loads(f.read_text()) if f.exists() else {"k": 1.0, "n_updates": 0}
+    so, sr, nb = sample
+    st["last_sample"] = {"opera_mm": round(so, 1), "rv_mm": round(sr, 1), "basins": nb}
+    if C.RV_BIAS_ADJUST and nb >= C.RV_BIAS_MIN_BASINS and so >= C.RV_BIAS_MIN_MM and sr > 0:
+        lo, hi = C.RV_BIAS_BOUNDS
+        k_new = float(np.clip(so / sr, lo, hi))
+        a = C.RV_BIAS_ALPHA if st["n_updates"] else 1.0     # first estimate taken as is
+        st["k"] = float(np.exp(a * np.log(k_new) + (1 - a) * np.log(st["k"])))
+        st["n_updates"] += 1; st["last_k"] = round(k_new, 3)
+    f.write_text(json.dumps(st, indent=1))
+    return st["k"] if C.RV_BIAS_ADJUST else 1.0, st
+
+def window_sum(arr, w):
+    """(sum mm, coverage 0-1) over the first w hourly slots. A missing hour adds
+    nothing to the sum but lowers the coverage, which is shown to the user."""
+    w = int(w); sub = arr[:w]
+    return np.nansum(sub, axis=0), (~np.isnan(sub)).sum(axis=0) / float(w)
+
+def response_window_sum(arr, d_h):
+    """Per-basin sum over its own integer response time d_h (h) + coverage."""
+    d_h = np.asarray(d_h).astype(int)
+    acc = np.zeros(arr.shape[1]); cov = np.zeros(arr.shape[1])
+    for d in np.unique(d_h):
+        cols = np.where(d_h == d)[0]
+        a, c = window_sum(arr[:, cols], d); acc[cols] = a; cov[cols] = c
+    return acc, cov
 
 # ----------------------------------------------------------------------
-# one cycle - decode each new frame ONCE, map it to every level
+# one cycle
 # ----------------------------------------------------------------------
+def choose_anchor(op_avail, past):
+    """T = newest OPERA hour, unless OPERA lags RainViewer by > OPERA_MAX_LAG_MIN."""
+    t_rv = int(past[-1]["time"]) if past else None
+    t_op = max(op_avail) if op_avail else None
+    if t_op and (t_rv is None or t_rv - t_op <= C.OPERA_MAX_LAG_MIN * 60):
+        return t_op, "opera"
+    if t_rv is None:
+        raise RuntimeError("no OPERA and no RainViewer data available")
+    return (t_rv // 900) * 900, "rainviewer (OPERA stale or unavailable)"
+
 def run_once(verbose=True):
+    t_start = time.time()
+    log = print if verbose else (lambda *a, **k: None)
     precompute()
-    xr, yr, _, _ = domain_grid()
-    host, past = rainviewer_frames()
-    levels = {lv: load_level(lv) for lv in C.LEVELS}
-    stores = {lv: load_store(lv) for lv in C.LEVELS}
-    have = {lv: set(int(t) for t in stores[lv].index) for lv in C.LEVELS}
-    new_rows = {lv: [] for lv in C.LEVELS}
+    xr, yr, glon, glat = domain_grid()
+    n_h = int(round(C.WINDOW_H))
 
-    todo = [f for f in past if any(int(f["time"]) not in have[lv] for lv in C.LEVELS)]
-    if verbose: print(f"cycle: {len(past)} frames available, {len(todo)} new to decode (shared across levels)")
-    for f in todo:
-        rate = fetch_frame_rate(host, f["path"], xr, yr)
+    # -- what is available right now --------------------------------------
+    host, past = rainviewer_frames()
+    op_avail = {}
+    if C.USE_OPERA:
+        try:
+            op_avail = Q.opera_list()
+        except Exception as e:
+            log(f"  OPERA listing failed ({type(e).__name__}: {e}) -> RainViewer only")
+    T, anchor_src = choose_anchor(op_avail, past)
+    oldest = T - n_h * 3600
+    log(f"cycle: anchor T = {Q._utc(T):%Y-%m-%d %H:%M} UTC ({anchor_src}); "
+        f"{len(op_avail)} OPERA hours listed, {len(past)} RainViewer frames")
+
+    levels = {lv: load_level(lv) for lv in C.LEVELS}
+    op_st = {lv: prune_store(load_store(lv, "opera"), oldest) for lv in C.LEVELS}
+    rv_st = {lv: prune_store(load_store(lv, "rv"), oldest) for lv in C.LEVELS}
+
+    # -- 1. OPERA: the hour slots ending at T, T-1h, ... --------------------
+    want = [T - k * 3600 for k in range(n_h)]
+    op_missing = {t for t in want if t not in op_avail}
+    todo = {t: op_avail[t] for t in want
+            if t in op_avail and any(t not in op_st[lv].index for lv in C.LEVELS)}
+    log(f"  OPERA: {n_h - len(op_missing)}/{n_h} hour slots on the server, {len(todo)} to download")
+    rows = {lv: [] for lv in C.LEVELS}
+    for t, grid in Q.opera_fetch_many(todo, glon, glat):
+        if grid is None:
+            op_missing.add(t); log(f"    OPERA {Q._utc(t):%H:%M} download failed"); continue
+        for lv in C.LEVELS:
+            cat, pmap = levels[lv]
+            rows[lv].append(pd.Series(areal_mean(grid, pmap, len(cat)),
+                                      index=cat["HYBAS_ID"].tolist(), name=t))
+    for lv in C.LEVELS:
+        op_st[lv] = merge_frames(op_st[lv], rows[lv])
+        if len(op_st[lv]): save_store(lv, "opera", op_st[lv])
+
+    # -- 2. RainViewer: only where OPERA is blind; whole domain if an OPERA
+    #       hour is missing or OPERA is down ------------------------------
+    full = (C.RV_MODE == "full") or bool(op_missing) or not C.USE_OPERA
+    tiles = None
+    if not full:
+        need = np.zeros(glon.size, bool)
+        for lv in C.LEVELS:
+            cat, pmap = levels[lv]
+            blind = np.isnan(op_st[lv].loc[T].reindex(cat["HYBAS_ID"]).to_numpy(float))
+            need |= (pmap >= 0) & blind[np.maximum(pmap, 0)]
+        tiles = Q.tiles_needing_rv(xr, yr, need.reshape(glon.shape))
+    n_tiles = len(list(xr)) * len(list(yr)) if tiles is None else len(tiles)
+    fr_todo = [f for f in past if int(f["time"]) > oldest - 3600
+               and any(int(f["time"]) not in rv_st[lv].index for lv in C.LEVELS)]
+    mode = "full domain" if full else "gap-fill"
+    log(f"  RainViewer: {mode}, {n_tiles} tiles/frame, {len(fr_todo)} new frames")
+    rows = {lv: [] for lv in C.LEVELS}; n_skip = 0
+    for f in (fr_todo if n_tiles else []):
+        rate, failed = fetch_frame_rate(host, f["path"], xr, yr, tiles)
+        if failed:                         # incomplete frame: don't store, retry next run
+            n_skip += 1; continue
         t = int(f["time"])
         for lv in C.LEVELS:
-            if t in have[lv]: continue
             cat, pmap = levels[lv]
-            new_rows[lv].append(pd.Series(areal_mean_mm(rate, pmap, len(cat)),
-                                          index=cat["HYBAS_ID"].tolist(), name=t))
+            rows[lv].append(pd.Series(areal_mean_mm(rate, pmap, len(cat)),
+                                      index=cat["HYBAS_ID"].tolist(), name=t))
+    if n_skip:
+        log(f"    {n_skip} RainViewer frame(s) incomplete -> not stored, retried next run")
+    for lv in C.LEVELS:
+        rv_st[lv] = merge_frames(rv_st[lv], rows[lv])
+        if len(rv_st[lv]): save_store(lv, "rv", rv_st[lv])
 
+    # -- 3. harmonise RainViewer to OPERA, merge, severity -----------------
+    ref = C.SEVERITY_LEVELS[0] if C.SEVERITY_LEVELS else C.LEVELS[-1]
+    rv_k, bias = rv_bias_update(rv_bias_sample(op_st[ref], rv_st[ref], T, n_h))
+    log(f"  RainViewer->OPERA factor k = {rv_k:.2f} (this run: {bias.get('last_sample')})")
+    meta_src = {"rv_scale": round(rv_k, 3), "anchor": anchor_src, "opera_hours": n_h - len(op_missing),
+                "window_hours": n_h, "rv_mode": mode, "rv_tiles_per_frame": n_tiles,
+                "rv_http": Q.rv_stats()}
     out = {}; pins = []
     for lv in C.LEVELS:
-        st = prune_store(merge_frames(stores[lv], new_rows[lv]), C.WINDOW_H)
-        if len(st): save_store(lv, st)
-        summary, lv_pins = _severity_for_level(levels[lv][0], st, host, past, lv)
+        cat = levels[lv][0]
+        arr, src = hourly_slots(op_st[lv], rv_st[lv], cat["HYBAS_ID"].tolist(), T, n_h, rv_k)
+        summary, lv_pins = _severity_for_level(cat, arr, src, T, host, past, lv, meta_src)
         out[lv] = summary; pins += lv_pins
     _write_pins(pins)
     if verbose:
         for lv in C.LEVELS:
             r = out[lv]
-            print(f"  L{lv}: {r['wet']} wet | {r['nalert']} >=10y | "
-                  f"max acc {r['maxacc']:.1f} mm | max T {r['maxT']:.0f} y")
-        print(f"  pins: {len(pins)} alerting basins across levels")
+            print(f"  L{lv}: {r['wet']} wet | {r['nalert']} >=10y | max acc {r['maxacc']:.1f} mm "
+                  f"| max T {r['maxT']:.0f} y | basin-hours OPERA {r['f_opera']:.0%} "
+                  f"RV {r['f_rv']:.0%} missing {r['f_miss']:.0%}")
+        print(f"  pins: {len(pins)} alerting basins | RainViewer HTTP {Q.rv_stats()} "
+              f"| {time.time() - t_start:.0f} s")
     return out
 
-def _severity_for_level(cat, store, host, past, lv):
+def _severity_for_level(cat, arr, src, T, host, past, lv, meta_src):
     is_sev = lv in C.SEVERITY_LEVELS
-    if not len(store):
-        if lv in C.POLY_LEVELS:
-            empty = cat.assign(**{f"acc_{w}h": 0.0 for w in C.ACC_WINDOWS_H})
-            empty = empty.assign(acc_mm=0.0, coverage=0.0, ratio=0.0, T_years=0.0,
-                                 color="#2b8cbe22", label="none")
-            _write_level_alerts(empty, int(past[-1]["time"]), 0.0, 0, host, past, lv)
-        return {"wet": 0, "nalert": 0, "maxacc": 0.0, "maxT": 0.0}, []
-    hids = cat["HYBAS_ID"].tolist()
-    cat = cat.copy()
+    cat = cat.copy(); n = len(cat)
+    # data-source shares, over basins seen by some radar at least once
+    seen = (src > 0).any(axis=0)
+    share = lambda code: float((src[:, seen] == code).mean()) if seen.any() else 0.0
+    stats = {"f_opera": share(1), "f_rv": share(2), "f_miss": share(0)}
 
-    # fixed-window accumulation (all served levels, drives the "Rain" view selector)
-    accw = fixed_window_accum(store, hids, C.ACC_WINDOWS_H)
     for w in C.ACC_WINDOWS_H:
-        cat[f"acc_{w}h"] = np.round(accw[w], 1)
+        a, c = window_sum(arr, w)
+        cat[f"acc_{w}h"] = np.round(a, 1); cat[f"cov_{w}h"] = np.round(c, 2)
 
+    acc = np.zeros(n); ratio = np.zeros(n); T_y = np.zeros(n); cov = np.zeros(n)
+    color = np.full(n, "#2b8cbe22", dtype=object); label = np.full(n, "none", dtype=object)
     if is_sev:
-        # severity over each basin's OWN response time, rounded to whole hours
-        # (accumulation window == DDF duration used for thr_mm; the Ceresetti method).
-        # WET GATE: only basins with >= SEVERITY_MIN_MM in the longest fixed window
-        # get the (per-basin) response-time math. That window upper-bounds the
-        # response-time accumulation, so the dry majority we skip cannot alert.
-        n = len(hids)
+        # severity over each basin's OWN response time (whole hours) = the same
+        # duration as its DDF threshold (Ceresetti method).
         dtest = cat["D_ddf_h"].to_numpy(); thr = cat["thr_mm"].to_numpy()
-        times = store.index.to_numpy(dtype=float)
-        now_t = times.max(); span_h = (now_t - times.min()) / 3600.0
-        acc = np.zeros(n); ratio = np.zeros(n); T = np.zeros(n)
-        color = np.full(n, "#2b8cbe22", dtype=object); label = np.full(n, "none", dtype=object)
-        wet = np.where(accw[C.ACC_WINDOWS_H[-1]] >= C.SEVERITY_MIN_MM)[0]
+        acc, cov = response_window_sum(arr, dtest)
+        # WET GATE: the longest fixed window bounds the response-time sum from above.
+        wet = np.where(cat[f"acc_{C.ACC_WINDOWS_H[-1]}h"].to_numpy() >= C.SEVERITY_MIN_MM)[0]
         if wet.size:
-            acc[wet], span_h, now_t = window_accumulate(store, [hids[i] for i in wet], dtest[wet])
             with np.errstate(divide="ignore", invalid="ignore"):
                 ratio[wet] = np.where(thr[wet] > 0, acc[wet] / thr[wet], 0.0)
-            T[wet] = [est_return_period(r) for r in ratio[wet]]
-            cc = [classify(t_, r_, a_) for t_, r_, a_ in zip(T[wet], ratio[wet], acc[wet])]
-            for k, i in enumerate(wet):
-                color[i], label[i] = cc[k]
-        cov = np.minimum(span_h, dtest) / dtest
-        cat["acc_mm"] = acc; cat["coverage"] = np.round(cov, 2)
-        cat["ratio"] = ratio; cat["T_years"] = T
-        cat["color"] = color; cat["label"] = label
-    else:
-        # accumulation-only level (L6/L7): no severity classification
-        times = store.index.to_numpy(dtype=float)
-        now_t = times.max(); span_h = (now_t - times.min()) / 3600.0
-        cat["acc_mm"] = 0.0; cat["coverage"] = 0.0; cat["ratio"] = 0.0
-        cat["T_years"] = 0.0; cat["color"] = "#2b8cbe22"; cat["label"] = "none"
+            T_y[wet] = [est_return_period(r) for r in ratio[wet]]
+            for i in wet:
+                color[i], label[i] = classify(T_y[i], ratio[i], acc[i])
+    cat["acc_mm"] = acc; cat["coverage"] = np.round(cov, 2)
+    cat["ratio"] = ratio; cat["T_years"] = T_y; cat["color"] = color; cat["label"] = label
 
     if lv in C.POLY_LEVELS:
-        _write_level_alerts(cat, int(now_t), span_h, len(store), host, past, lv)
+        _write_level_alerts(cat, int(T), host, past, lv, meta_src, stats)
 
     pins = [{"type": "Feature",
              "geometry": {"type": "Point", "coordinates": [round(r.cen_x, 4), round(r.cen_y, 4)]},
              "properties": {"level": lv, "color": r.color, "label": r.label,
                             "T": round(r.T_years), "acc_mm": round(r.acc_mm, 1),
                             "thr_mm": round(r.thr_mm, 1), "D_ddf_h": int(r.D_ddf_h),
-                            "HYBAS_ID": r.HYBAS_ID}}
+                            "coverage": r.coverage, "HYBAS_ID": r.HYBAS_ID}}
             for r in cat.itertuples() if r.label in C.PIN_LABELS] if is_sev else []
 
-    maxacc = float(cat[f"acc_{C.ACC_WINDOWS_H[-1]}h"].max())      # longest-window peak accumulation
-    return ({"wet": int((cat[f"acc_{C.ACC_WINDOWS_H[-1]}h"] > 0.2).sum()),
+    longest = cat[f"acc_{C.ACC_WINDOWS_H[-1]}h"]
+    return ({"wet": int((longest > 0.2).sum()),
              "nalert": int(cat["label"].isin(["~10y", "~30y", ">=100y"]).sum()),
-             "maxacc": maxacc, "maxT": float(cat["T_years"].max())}, pins)
+             "maxacc": float(longest.max()), "maxT": float(cat["T_years"].max()), **stats}, pins)
 
 def _write_pins(features):
     (C.WEBDATA / "pins.geojson").write_text(
         json.dumps({"type": "FeatureCollection", "features": features}))
 
-def _write_level_alerts(cat, now_t, span_h, n_frames, host, past, lv):
+def _write_level_alerts(cat, T, host, past, lv, meta_src, stats):
     is_sev = lv in C.SEVERITY_LEVELS
-    meta = {"generated_unix": int(now_t), "store_span_h": round(span_h, 2), "n_frames": int(n_frames),
+    meta = {"generated_unix": int(T), "data_end_unix": int(T), "run_unix": int(time.time()),
+            "window_h": int(round(C.WINDOW_H)), "store_span_h": float(round(C.WINDOW_H)),
             "level": lv, "severity": is_sev, "acc_windows_h": C.ACC_WINDOWS_H,
-            "domain": C.DOMAIN_BBOX, "qpe": "rainviewer-calibrated",
-            "cal_factor": C.CAL_FACTOR, "rainviewer_host": host, "rainviewer_path": past[-1]["path"]}
-    # Include a basin if it has any measurable rain in any fixed window, or (on a
-    # severity level) it carries a severity label. acc = {window_h: mm}.
+            "domain": C.DOMAIN_BBOX,
+            "qpe": "OPERA NIMBUS 1-h accumulation (EUMETNET, CC BY 4.0) + RainViewer gap-fill",
+            "sources": meta_src, "basin_hours": {k: round(v, 3) for k, v in stats.items()},
+            "cal_factor": C.CAL_FACTOR, "rainviewer_host": host,
+            "rainviewer_path": past[-1]["path"] if past else None}
+    # Include a basin if it has measurable rain in any window or a severity label.
+    # acc/cov = {window_h: value}; cov only written when some window is incomplete.
     alerts = {}
     for r in cat.itertuples():
         acc = {str(w): getattr(r, f"acc_{w}h") for w in C.ACC_WINDOWS_H}
@@ -514,6 +613,9 @@ def _write_level_alerts(cat, now_t, span_h, n_frames, host, past, lv):
         if not (max(acc.values()) >= C.RAIN_MIN_MM or (is_sev and label != "none")):
             continue
         entry = {"acc": acc}
+        cov = {str(w): getattr(r, f"cov_{w}h") for w in C.ACC_WINDOWS_H}
+        if min(cov.values()) < 1:
+            entry["cov"] = cov
         if is_sev:
             entry.update({"T": round(r.T_years), "ratio": round(r.ratio, 2),
                           "acc_mm": round(r.acc_mm, 1), "color": r.color,

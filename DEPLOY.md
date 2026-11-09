@@ -24,7 +24,7 @@ Creates (small, meant to be committed):
 
 L9 is computed for the alert **pins** only (its 41k polygons are never served), so
 it has `attrs_L9`/`pixel_cat_L9` but no geojson. The dynamic outputs
-(`alerts_L*.json`, `pins.geojson`, `frames_L*.csv`) are git-ignored and produced
+(`alerts_L*.json`, `pins.geojson`, `opera_L*.csv`, `rv_L*.csv`, `rv_bias.json`) are git-ignored and produced
 each cycle.
 
 > Redo this only when you change `DOMAIN_BBOX`, `LEVELS`, `TILE_Z` or `SIMPLIFY`.
@@ -78,13 +78,14 @@ Actions”.** (No branch/folder to pick — the workflow publishes the site.)
 **nowcast** workflow → **Run workflow** (manual trigger) to start immediately; after
 that the 15-min cron takes over.
 
-- The **first run takes ~4 min** (it fetches all ~13 radar frames to warm the store).
-- Later runs are quick (only new frames).
+- The **first run takes ~4-5 min** (12 OPERA hours + rate-limited RainViewer gap-fill tiles).
+- Later runs take ~40 s.
 - When it finishes, your live site is at:
   **`https://<YOUR_USER>.github.io/floodnowcasting-eu/`**
 
-The 6–10 h accumulation window fills in gradually as the store grows over ~40 runs
-(≈10 h). Alerts appear only when rain over a basin passes its return-period thresholds.
+The full 12 h window is available **from the first run** wherever OPERA has
+radar (it keeps 24 h server-side). Outside OPERA, the RainViewer gap-fill builds
+up over successive runs. Alerts appear only when rain over a basin passes its return-period thresholds.
 
 ---
 
@@ -116,9 +117,9 @@ Pages, `python -m http.server`, nginx, …) pointed at that folder.
 ## Notes & limits
 
 - **GitHub Actions cron** is best-effort; under load runs may be delayed a few minutes.
-- **Actions cache** (rolling store) can be evicted after ~7 days of inactivity; the
-  window simply rebuilds from the last 2 h on the next run.
-- **Accuracy**: rainfall is calibrated RainViewer radar (`CAL_FACTOR`); tune it against
-  local gauges. Swap in EUMETNET OPERA QPE for gauge-adjusted millimetres.
+- **Actions cache** (rolling store) is only a cache: if evicted, OPERA hours are
+  simply re-downloaded (24 h server-side history).
+- **Accuracy**: rainfall is EUMETNET OPERA NIMBUS (not gauge-adjusted), with
+  RainViewer outside OPERA rescaled to it (`state/rv_bias.json`).
 - **Finer detail everywhere** (level 9 all-Europe): generate PMTiles with `tippecanoe`
   instead of GeoJSON — see `operational/README.md`.
